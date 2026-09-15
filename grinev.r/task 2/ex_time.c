@@ -11,23 +11,11 @@ int main(void)
     struct tm *sp;
     static char california_tz[] = "TZ=PST8";
 
-    if (putenv(california_tz) != 0) {
-        perror("putenv");
-        return 1;
-    }
-
+    putenv(california_tz);
     tzset();
 
-    if (time(&now) == (time_t)-1) {
-        perror("time");
-        return 1;
-    }
-
+    time(&now);
     sp = localtime(&now);
-    if (sp == NULL) {
-        perror("localtime");
-        return 1;
-    }
 
     printf("%02d/%02d/%04d %02d:%02d:%02d %s\n",
         sp->tm_mon + 1,
