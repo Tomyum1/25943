@@ -3,28 +3,39 @@
 #include <time.h>
 #include <stdlib.h>
 
-extern char *tzname[];
-
 int main(void)
 {
     time_t now;
     struct tm *sp;
-    static char california_tz[] = "TZ=PST8PDT";
 
-    putenv(california_tz);
-    tzset();
+    static char pst_tz[] = "TZ=PST8";
+    static char pdt_tz[] = "TZ=PDT7";
 
     time(&now);
+
+    putenv(pst_tz);
+    tzset();
     sp = localtime(&now);
 
-    printf("%02d/%02d/%04d %02d:%02d:%02d %s\n",
+    printf("PST: %02d/%02d/%04d %02d:%02d:%02d\n",
         sp->tm_mon + 1,
         sp->tm_mday,
         sp->tm_year + 1900,
         sp->tm_hour,
         sp->tm_min,
-        sp->tm_sec,
-        tzname[sp->tm_isdst > 0]);
+        sp->tm_sec);
+
+    putenv(pdt_tz);
+    tzset();
+    sp = localtime(&now);
+
+    printf("PDT: %02d/%02d/%04d %02d:%02d:%02d\n",
+        sp->tm_mon + 1,
+        sp->tm_mday,
+        sp->tm_year + 1900,
+        sp->tm_hour,
+        sp->tm_min,
+        sp->tm_sec);
 
     return 0;
 }
