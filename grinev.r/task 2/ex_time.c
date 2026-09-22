@@ -9,7 +9,7 @@ int main(void)
 {
     time_t now;
     struct tm *sp;
-    static char california_tz[] = "TZ=PST8";
+    static char california_tz[] = "TZ=PST8PDT";
 
     putenv(california_tz);
     tzset();
