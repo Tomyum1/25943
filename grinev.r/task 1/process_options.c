@@ -44,7 +44,10 @@ static int parse_nonnegative_long(const char *text, long *result)
     errno = 0;
     value = strtol(text, &end, 10);
 
-    if (errno == ERANGE || end == text || *end != '\0' || value < 0) {
+    if (errno == ERANGE ||
+        end == text ||
+        *end != '\0' ||
+        value < 0) {
         return -1;
     }
 
@@ -54,13 +57,17 @@ static int parse_nonnegative_long(const char *text, long *result)
 
 static void print_process_ids(void)
 {
-    pid_t pid = getpid();
-    pid_t pgrp = getpgrp();
+    pid_t pid;
+    pid_t pgrp;
+
+    pid = getpid();
+    pgrp = getpgrp();
 
     printf("  PID:  %ld\n", (long)pid);
     printf("  PPID: %ld\n", (long)getppid());
     printf("  PGRP: %ld\n", (long)pgrp);
-    printf("  Лидер группы: %s\n", pid == pgrp ? "да" : "нет");
+    printf("  Лидер группы: %s\n",
+        pid == pgrp ? "да" : "нет");
 }
 
 int main(int argc, char *argv[])
@@ -68,19 +75,21 @@ int main(int argc, char *argv[])
     const char valid_options[] = ":hispuU:cC:dvV:";
     int saved_options[MAX_OPTIONS];
     char *saved_arguments[MAX_OPTIONS];
+
     int option;
-    int count = 0;
+    int count;
     int i;
     int j;
-    int status = EXIT_SUCCESS;
-    long value;
-    long old_value;
-    long new_value;
-    char directory[1024];
-    struct rlimit limit;
-    struct rlimit file_limit_before;
-    struct rlimit file_limit_after;
+    int status;
 
+    long value;
+    char directory[1024];
+
+    struct rlimit limit;
+    struct rlimit file_limit;
+
+    count = 0;
+    status = EXIT_SUCCESS;
     opterr = 0;
 
     if (argc == 1) {
@@ -88,7 +97,9 @@ int main(int argc, char *argv[])
         return EXIT_SUCCESS;
     }
 
-    /* Сначала только разбираем и сохраняем опции. */
+    /*
+     * Сначала программа только разбирает и сохраняет опции.
+     */
     while ((option = getopt(argc, argv, valid_options)) != -1) {
         if (option == 'h') {
             print_help(stdout, argv[0]);
@@ -96,13 +107,17 @@ int main(int argc, char *argv[])
         }
 
         if (option == '?') {
-            fprintf(stderr, "Недопустимая опция: -%c\n\n", optopt);
+            fprintf(stderr,
+                "Недопустимая опция: -%c\n\n",
+                optopt);
             print_help(stderr, argv[0]);
             return EXIT_FAILURE;
         }
 
         if (option == ':') {
-            fprintf(stderr, "Для опции -%c требуется значение.\n\n", optopt);
+            fprintf(stderr,
+                "Для опции -%c требуется значение.\n\n",
+                optopt);
             print_help(stderr, argv[0]);
             return EXIT_FAILURE;
         }
@@ -119,12 +134,16 @@ int main(int argc, char *argv[])
     }
 
     if (optind < argc) {
-        fprintf(stderr, "Неожиданный аргумент: %s\n\n", argv[optind]);
+        fprintf(stderr,
+            "Неожиданный аргумент: %s\n\n",
+            argv[optind]);
         print_help(stderr, argv[0]);
         return EXIT_FAILURE;
     }
 
-    /* Выполняем сохранённые опции справа налево. */
+    /*
+     * Сохранённые опции выполняются справа налево.
+     */
     for (i = count - 1; i >= 0; i--) {
         switch (saved_options[i]) {
         case 'i':
@@ -157,41 +176,30 @@ int main(int argc, char *argv[])
             break;
 
         case 'u':
-            if (getrlimit(RLIMIT_FSIZE, &file_limit_after) == -1) {
+            if (getrlimit(RLIMIT_FSIZE, &file_limit) == -1) {
                 perror("getrlimit(RLIMIT_FSIZE)");
                 status = EXIT_FAILURE;
-            } else if (file_limit_after.rlim_cur == RLIM_INFINITY) {
+            } else if (file_limit.rlim_cur == RLIM_INFINITY) {
                 printf("ulimit: unlimited\n");
             } else {
                 errno = 0;
                 value = ulimit(UL_GETFSIZE);
+
                 if (value == -1 && errno != 0) {
                     perror("ulimit");
                     status = EXIT_FAILURE;
                 } else {
-                    printf("ulimit: %ld блоков по 512 байт\n", value);
+                    printf("ulimit: %ld\n", value);
                 }
             }
             break;
 
         case 'U':
-            if (parse_nonnegative_long(saved_arguments[i], &value) == -1) {
-                fprintf(stderr, "Неудачное значение для -U: %s\n",
+            if (parse_nonnegative_long(
+                    saved_arguments[i], &value) == -1) {
+                fprintf(stderr,
+                    "Неудачное значение для -U: %s\n",
                     saved_arguments[i]);
-                status = EXIT_FAILURE;
-                break;
-            }
-
-            if (getrlimit(RLIMIT_FSIZE, &file_limit_before) == -1) {
-                perror("getrlimit(RLIMIT_FSIZE)");
-                status = EXIT_FAILURE;
-                break;
-            }
-
-            errno = 0;
-            old_value = ulimit(UL_GETFSIZE);
-            if (old_value == -1 && errno != 0) {
-                perror("ulimit(UL_GETFSIZE)");
                 status = EXIT_FAILURE;
                 break;
             }
@@ -199,36 +207,7 @@ int main(int argc, char *argv[])
             if (ulimit(UL_SETFSIZE, value) == -1) {
                 perror("ulimit(UL_SETFSIZE)");
                 status = EXIT_FAILURE;
-                break;
             }
-
-            if (getrlimit(RLIMIT_FSIZE, &file_limit_after) == -1) {
-                perror("getrlimit(RLIMIT_FSIZE)");
-                status = EXIT_FAILURE;
-                break;
-            }
-
-            errno = 0;
-            new_value = ulimit(UL_GETFSIZE);
-            if (new_value == -1 && errno != 0) {
-                perror("ulimit(UL_GETFSIZE)");
-                status = EXIT_FAILURE;
-                break;
-            }
-
-            printf("ulimit процесса %ld изменён: ", (long)getpid());
-            if (file_limit_before.rlim_cur == RLIM_INFINITY) {
-                printf("unlimited");
-            } else {
-                printf("%ld", old_value);
-            }
-            printf(" -> ");
-            if (file_limit_after.rlim_cur == RLIM_INFINITY) {
-                printf("unlimited");
-            } else {
-                printf("%ld", new_value);
-            }
-            printf(" блоков по 512 байт\n");
             break;
 
         case 'c':
@@ -244,8 +223,10 @@ int main(int argc, char *argv[])
             break;
 
         case 'C':
-            if (parse_nonnegative_long(saved_arguments[i], &value) == -1) {
-                fprintf(stderr, "Неудачное значение для -C: %s\n",
+            if (parse_nonnegative_long(
+                    saved_arguments[i], &value) == -1) {
+                fprintf(stderr,
+                    "Неудачное значение для -C: %s\n",
                     saved_arguments[i]);
                 status = EXIT_FAILURE;
                 break;
@@ -258,6 +239,7 @@ int main(int argc, char *argv[])
             }
 
             limit.rlim_cur = (rlim_t)value;
+
             if (setrlimit(RLIMIT_CORE, &limit) == -1) {
                 perror("setrlimit");
                 status = EXIT_FAILURE;
@@ -282,7 +264,8 @@ int main(int argc, char *argv[])
         case 'V':
             if (saved_arguments[i][0] == '=' ||
                 strchr(saved_arguments[i], '=') == NULL) {
-                fprintf(stderr, "После -V требуется name=value\n");
+                fprintf(stderr,
+                    "После -V требуется name=value\n");
                 status = EXIT_FAILURE;
             } else if (putenv(saved_arguments[i]) != 0) {
                 perror("putenv");
