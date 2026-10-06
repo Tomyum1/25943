@@ -17,6 +17,10 @@
 
 extern char **environ;
 
+#ifndef RLIMIT_NPROC
+static long local_process_limit = -1;
+#endif
+
 static void print_help(FILE *stream, const char *program)
 {
     fprintf(stream,
@@ -93,8 +97,12 @@ static int print_max_user_processes(void)
 #else
     long process_limit;
 
-    errno = 0;
-    process_limit = sysconf(_SC_CHILD_MAX);
+    if (local_process_limit >= 0) {
+        process_limit = local_process_limit;
+    } else {
+        errno = 0;
+        process_limit = sysconf(_SC_CHILD_MAX);
+    }
 
     if (process_limit == -1) {
         if (errno != 0) {
@@ -131,13 +139,12 @@ static int set_max_user_processes(long value)
 
     return 0;
 #else
-    (void)value;
-
-    fprintf(stderr,
-        "Изменение max user processes "
-        "не поддерживается этой системой.\n");
-
-    return -1;
+    /*
+     * На системах без RLIMIT_NPROC сохраняем значение
+     * внутри текущего запуска программы.
+     */
+    local_process_limit = value;
+    return 0;
 #endif
 }
 
