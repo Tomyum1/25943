@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#define INPUT_SIZE 128
+
 typedef struct LineInfo
 {
     off_t offset;
@@ -88,6 +90,33 @@ static int read_exactly(int fd, char *buffer, size_t length)
     return 0;
 }
 
+static int parse_line_number(const char *text, long *line_number)
+{
+    char *end;
+    long value;
+
+    errno = 0;
+    value = strtol(text, &end, 10);
+
+    if (errno == ERANGE || end == text)
+    {
+        return -1;
+    }
+
+    while (*end == ' ' || *end == '\t')
+    {
+        end++;
+    }
+
+    if (*end != '\n' && *end != '\0')
+    {
+        return -1;
+    }
+
+    *line_number = value;
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
     int fd;
@@ -102,10 +131,12 @@ int main(int argc, char *argv[])
     off_t current_position;
     off_t line_length;
 
+    char input[INPUT_SIZE];
     long line_number;
     LineInfo selected_line;
     char *line_buffer;
 
+    size_t i;
     int status;
 
     if (argc != 2)
@@ -177,6 +208,14 @@ int main(int argc, char *argv[])
             line_length =
                 (current_position - 1) - line_start;
 
+            if (line_length < 0)
+            {
+                fprintf(stderr, "Invalid file position\n");
+                free(table);
+                close(fd);
+                return EXIT_FAILURE;
+            }
+
             if (add_line(
                     &table,
                     &line_count,
@@ -223,7 +262,7 @@ int main(int argc, char *argv[])
     printf("Line table:\n");
     printf("Number\tOffset\tLength\n");
 
-    for (size_t i = 0; i < line_count; i++)
+    for (i = 0; i < line_count; i++)
     {
         printf(
             "%zu\t%lld\t%zu\n",
@@ -238,11 +277,21 @@ int main(int argc, char *argv[])
         printf("Enter line number (0 to exit): ");
         fflush(stdout);
 
-        if (scanf("%ld", &line_number) != 1)
+        if (fgets(input, sizeof(input), stdin) == NULL)
+        {
+            if (ferror(stdin))
+            {
+                perror("fgets");
+                status = EXIT_FAILURE;
+            }
+
+            break;
+        }
+
+        if (parse_line_number(input, &line_number) == -1)
         {
             fprintf(stderr, "Invalid line number\n");
-            status = EXIT_FAILURE;
-            break;
+            continue;
         }
 
         if (line_number == 0)
