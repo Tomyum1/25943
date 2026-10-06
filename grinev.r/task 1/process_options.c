@@ -1,11 +1,15 @@
+#define __EXTENSIONS__ 1
 #define _XOPEN_SOURCE 600
+
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1
+#endif
 
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <ulimit.h>
 #include <sys/types.h>
 #include <sys/resource.h>
 
@@ -22,8 +26,8 @@ static void print_help(FILE *stream, const char *program)
         "  -i              показать реальные и эффективные UID/GID\n"
         "  -s              сделать процесс лидером группы и показать до/после\n"
         "  -p              показать PID, PPID и PGRP\n"
-        "  -u              показать текущий ulimit\n"
-        "  -Uчисло         изменить ulimit текущего процесса\n"
+        "  -u              показать max user processes\n"
+        "  -Uчисло         изменить max user processes текущего процесса\n"
         "  -c              показать допустимый размер core-файла\n"
         "  -Cчисло         изменить допустимый размер core-файла\n"
         "  -d              показать текущую рабочую директорию\n"
@@ -70,6 +74,73 @@ static void print_process_ids(void)
         pid == pgrp ? "да" : "нет");
 }
 
+static int print_max_user_processes(void)
+{
+#ifdef RLIMIT_NPROC
+    struct rlimit process_limit;
+
+    if (getrlimit(RLIMIT_NPROC, &process_limit) == -1) {
+        perror("getrlimit(RLIMIT_NPROC)");
+        return -1;
+    }
+
+    if (process_limit.rlim_cur == RLIM_INFINITY) {
+        printf("max user processes              (-u) unlimited\n");
+    } else {
+        printf("max user processes              (-u) %llu\n",
+            (unsigned long long)process_limit.rlim_cur);
+    }
+#else
+    long process_limit;
+
+    errno = 0;
+    process_limit = sysconf(_SC_CHILD_MAX);
+
+    if (process_limit == -1) {
+        if (errno != 0) {
+            perror("sysconf(_SC_CHILD_MAX)");
+            return -1;
+        }
+
+        printf("max user processes              (-u) unlimited\n");
+    } else {
+        printf("max user processes              (-u) %ld\n",
+            process_limit);
+    }
+#endif
+
+    return 0;
+}
+
+static int set_max_user_processes(long value)
+{
+#ifdef RLIMIT_NPROC
+    struct rlimit process_limit;
+
+    if (getrlimit(RLIMIT_NPROC, &process_limit) == -1) {
+        perror("getrlimit(RLIMIT_NPROC)");
+        return -1;
+    }
+
+    process_limit.rlim_cur = (rlim_t)value;
+
+    if (setrlimit(RLIMIT_NPROC, &process_limit) == -1) {
+        perror("setrlimit(RLIMIT_NPROC)");
+        return -1;
+    }
+
+    return 0;
+#else
+    (void)value;
+
+    fprintf(stderr,
+        "Изменение max user processes "
+        "не поддерживается этой системой.\n");
+
+    return -1;
+#endif
+}
+
 int main(int argc, char *argv[])
 {
     const char valid_options[] = ":hispuU:cC:dvV:";
@@ -86,7 +157,6 @@ int main(int argc, char *argv[])
     char directory[1024];
 
     struct rlimit limit;
-    struct rlimit file_limit;
 
     count = 0;
     status = EXIT_SUCCESS;
@@ -110,6 +180,7 @@ int main(int argc, char *argv[])
             fprintf(stderr,
                 "Недопустимая опция: -%c\n\n",
                 optopt);
+
             print_help(stderr, argv[0]);
             return EXIT_FAILURE;
         }
@@ -118,6 +189,7 @@ int main(int argc, char *argv[])
             fprintf(stderr,
                 "Для опции -%c требуется значение.\n\n",
                 optopt);
+
             print_help(stderr, argv[0]);
             return EXIT_FAILURE;
         }
@@ -137,6 +209,7 @@ int main(int argc, char *argv[])
         fprintf(stderr,
             "Неожиданный аргумент: %s\n\n",
             argv[optind]);
+
         print_help(stderr, argv[0]);
         return EXIT_FAILURE;
     }
@@ -176,21 +249,8 @@ int main(int argc, char *argv[])
             break;
 
         case 'u':
-            if (getrlimit(RLIMIT_FSIZE, &file_limit) == -1) {
-                perror("getrlimit(RLIMIT_FSIZE)");
+            if (print_max_user_processes() == -1) {
                 status = EXIT_FAILURE;
-            } else if (file_limit.rlim_cur == RLIM_INFINITY) {
-                printf("ulimit: unlimited\n");
-            } else {
-                errno = 0;
-                value = ulimit(UL_GETFSIZE);
-
-                if (value == -1 && errno != 0) {
-                    perror("ulimit");
-                    status = EXIT_FAILURE;
-                } else {
-                    printf("ulimit: %ld\n", value);
-                }
             }
             break;
 
@@ -200,12 +260,12 @@ int main(int argc, char *argv[])
                 fprintf(stderr,
                     "Неудачное значение для -U: %s\n",
                     saved_arguments[i]);
+
                 status = EXIT_FAILURE;
                 break;
             }
 
-            if (ulimit(UL_SETFSIZE, value) == -1) {
-                perror("ulimit(UL_SETFSIZE)");
+            if (set_max_user_processes(value) == -1) {
                 status = EXIT_FAILURE;
             }
             break;
@@ -228,6 +288,7 @@ int main(int argc, char *argv[])
                 fprintf(stderr,
                     "Неудачное значение для -C: %s\n",
                     saved_arguments[i]);
+
                 status = EXIT_FAILURE;
                 break;
             }
@@ -266,6 +327,7 @@ int main(int argc, char *argv[])
                 strchr(saved_arguments[i], '=') == NULL) {
                 fprintf(stderr,
                     "После -V требуется name=value\n");
+
                 status = EXIT_FAILURE;
             } else if (putenv(saved_arguments[i]) != 0) {
                 perror("putenv");
