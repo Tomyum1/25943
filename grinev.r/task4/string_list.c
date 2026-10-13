@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <termios.h>
+#include <unistd.h>
 
 #define MAX_INPUT_BYTES 80
 #define INPUT_BUFFER_SIZE (MAX_INPUT_BYTES + 2)
@@ -23,6 +25,66 @@ enum ReadResult
     READ_TOO_LONG = 3,
     READ_CONTROL_ONLY = 4
 };
+
+static struct termios saved_terminal;
+static int terminal_was_changed = 0;
+
+static void restore_terminal(void)
+{
+    if (terminal_was_changed)
+    {
+        tcsetattr(STDIN_FILENO, TCSANOW, &saved_terminal);
+        terminal_was_changed = 0;
+    }
+}
+
+static int restrict_terminal_commands(void)
+{
+    struct termios restricted_terminal;
+
+    if (!isatty(STDIN_FILENO))
+    {
+        return 0;
+    }
+
+    if (tcgetattr(STDIN_FILENO, &saved_terminal) == -1)
+    {
+        perror("tcgetattr");
+        return -1;
+    }
+
+    restricted_terminal = saved_terminal;
+    restricted_terminal.c_lflag &= (tcflag_t)~IEXTEN;
+
+#ifdef VREPRINT
+    restricted_terminal.c_cc[VREPRINT] = _POSIX_VDISABLE;
+#endif
+
+#ifdef VDISCARD
+    restricted_terminal.c_cc[VDISCARD] = _POSIX_VDISABLE;
+#endif
+
+#ifdef VLNEXT
+    restricted_terminal.c_cc[VLNEXT] = _POSIX_VDISABLE;
+#endif
+
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &restricted_terminal) == -1)
+    {
+        perror("tcsetattr");
+        return -1;
+    }
+
+    terminal_was_changed = 1;
+
+    if (atexit(restore_terminal) != 0)
+    {
+        restore_terminal();
+        fprintf(stderr, "Cannot register terminal restoration.\n");
+        return -1;
+    }
+
+    return 0;
+}
 
 static void free_list(Node *head)
 {
@@ -280,6 +342,11 @@ int main(void)
     tail = NULL;
     status = EXIT_SUCCESS;
 
+    if (restrict_terminal_commands() == -1)
+    {
+        return EXIT_FAILURE;
+    }
+
     printf("Enter strings, maximum %d bytes each.\n", MAX_INPUT_BYTES);
     printf("A dot at the beginning finishes input.\n");
 
@@ -324,6 +391,7 @@ int main(void)
 
     if (status == EXIT_SUCCESS)
     {
+        restore_terminal();
         printf("Stored strings:\n");
 
         for (current = head; current != NULL; current = current->next)
@@ -331,6 +399,8 @@ int main(void)
             puts(current->text);
         }
     }
+
+    restore_terminal();
 
     free_list(head);
     return status;
