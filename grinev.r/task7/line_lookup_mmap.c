@@ -210,12 +210,12 @@ static int show_input(const char *text, int length)
     }
 
     if (ioctl(STDERR_FILENO, TIOCGWINSZ, &window) == 0 &&
-        window.ws_col > 0) {
-        width = window.ws_col - 1;
+        window.ws_col > 3) {
+        width = window.ws_col - 3;
     }
 
     start = length > width ? length - width : 0;
-    if (fprintf(stderr, "\r\033[2K%.*s", length - start,
+    if (fprintf(stderr, "\r\033[2K> %.*s", length - start,
                 text + start) < 0 || fflush(stderr) == EOF) {
         return -1;
     }
@@ -541,11 +541,13 @@ int main(int argc, char *argv[])
     }
 
     for (;;) {
-        printf("Введите номер строки%s (0 — выход): ",
+        printf("Введите номер строки%s (0 — выход):\n",
                first_input ? " за 5 секунд" : "");
         fflush(stdout);
 
-        if (first_input) {
+        if (show_input("", 0) == -1) {
+            input_result = INPUT_ERROR;
+        } else if (first_input) {
             input_result = timed_read_line_number(&line_number);
             first_input = 0;
         } else {
