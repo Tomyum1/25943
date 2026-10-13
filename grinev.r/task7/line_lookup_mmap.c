@@ -1,11 +1,16 @@
-#define _XOPEN_SOURCE 600
+#ifndef __EXTENSIONS__
+#define __EXTENSIONS__ 1
+#endif
+#define _POSIX_C_SOURCE 200809L
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <termios.h>
@@ -13,7 +18,8 @@
 
 #define INITIAL_CAPACITY 16
 #define MAX_INPUT_BYTES 80
-#define INPUT_SIZE (MAX_INPUT_BYTES + 2)
+#define ESC_WAIT_MS 100
+#define INPUT_SECONDS 5
 
 typedef struct LineInfo {
     size_t offset;
@@ -21,284 +27,329 @@ typedef struct LineInfo {
 } LineInfo;
 
 enum InputResult {
-    INPUT_ERROR = -1,
-    INPUT_TIMEOUT = -2,
+    INPUT_TIMEOUT = -4,
+    INPUT_SIGNAL = -3,
+    INPUT_ERROR = -2,
+    INPUT_INVALID = -1,
     INPUT_EOF = 0,
-    INPUT_OK = 1,
-    INPUT_INVALID = 2,
-    INPUT_TOO_LONG = 3
+    INPUT_OK = 1
 };
 
-static volatile sig_atomic_t alarm_expired = 0;
 static struct termios saved_terminal;
 static int terminal_was_changed = 0;
-static int input_is_terminal = 0;
+static int pending_byte = -1;
+static int skip_line_feed = 0;
+static volatile sig_atomic_t stopped_signal = 0;
+static volatile sig_atomic_t alarm_expired = 0;
 
-static void alarm_handler(int signal_number)
+static void signal_handler(int signal_number)
 {
-    (void)signal_number;
-    alarm_expired = 1;
+    if (signal_number == SIGALRM) {
+        alarm_expired = 1;
+    } else {
+        stopped_signal = signal_number;
+    }
 }
 
 static void restore_terminal(void)
 {
     if (terminal_was_changed) {
-        tcsetattr(STDIN_FILENO, TCSANOW, &saved_terminal);
-        terminal_was_changed = 0;
+        if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved_terminal) == -1) {
+            perror("restore terminal");
+        } else {
+            terminal_was_changed = 0;
+        }
     }
 }
 
-static int restrict_terminal_commands(void)
+static int setup_terminal(void)
 {
-    struct termios restricted_terminal;
+    struct termios terminal;
+    struct sigaction action;
+    int signals[] = {SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGALRM};
+    size_t i;
 
-    input_is_terminal = isatty(STDIN_FILENO);
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = signal_handler;
+    sigemptyset(&action.sa_mask);
 
-    if (!input_is_terminal) {
-        return 0;
+    for (i = 0; i < sizeof(signals) / sizeof(signals[0]); i++) {
+        if (sigaction(signals[i], &action, NULL) == -1) {
+            return -1;
+        }
     }
 
+    if (!isatty(STDIN_FILENO)) {
+        return 0;
+    }
     if (tcgetattr(STDIN_FILENO, &saved_terminal) == -1) {
-        perror("tcgetattr");
         return -1;
     }
 
-    restricted_terminal = saved_terminal;
-    restricted_terminal.c_lflag &= (tcflag_t)~(ICANON | ECHO);
-    restricted_terminal.c_cc[VMIN] = 1;
-    restricted_terminal.c_cc[VTIME] = 0;
+    terminal = saved_terminal;
+    terminal.c_lflag &= (tcflag_t)~(ICANON | ECHO | ECHONL | ISIG | IEXTEN);
+    terminal.c_iflag &=
+        (tcflag_t)~(IXON | IXOFF | ICRNL | INLCR | IGNCR | ISTRIP);
+    terminal.c_cc[VMIN] = 1;
+    terminal.c_cc[VTIME] = 0;
 
-#ifdef VREPRINT
-    restricted_terminal.c_cc[VREPRINT] = _POSIX_VDISABLE;
-#endif
-#ifdef VDISCARD
-    restricted_terminal.c_cc[VDISCARD] = _POSIX_VDISABLE;
-#endif
-#ifdef VLNEXT
-    restricted_terminal.c_cc[VLNEXT] = _POSIX_VDISABLE;
-#endif
-
-    if (tcsetattr(STDIN_FILENO, TCSANOW, &restricted_terminal) == -1) {
-        perror("tcsetattr");
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &terminal) == -1) {
         return -1;
     }
 
     terminal_was_changed = 1;
-
-    if (atexit(restore_terminal) != 0) {
-        restore_terminal();
-        fprintf(stderr, "Не удалось зарегистрировать восстановление терминала.\n");
-        return -1;
-    }
-
     return 0;
 }
 
-static size_t skip_escape_sequence(const unsigned char *input,
-                                   size_t position)
+/* read() здесь используется только для клавиатуры.
+ * Содержимое текстового файла доступно только через mmap(). */
+static int read_byte(unsigned char *character, int timeout_ms)
 {
-    size_t i = position + 1;
+    struct pollfd descriptor;
+    ssize_t count;
+    int result;
 
-    if (input[i] == '\0') {
-        return i;
-    }
+    descriptor.fd = STDIN_FILENO;
+    descriptor.events = POLLIN;
+    descriptor.revents = 0;
 
-    if (input[i] == '[') {
-        i++;
-        while (input[i] != '\0') {
-            unsigned char character = input[i++];
-            if (character >= 0x40U && character <= 0x7EU) {
-                break;
-            }
+    while (!stopped_signal && !alarm_expired) {
+        if (pending_byte != -1) {
+            *character = (unsigned char)pending_byte;
+            pending_byte = -1;
+            return 1;
         }
-        return i;
-    }
 
-    if (input[i] == ']' || input[i] == 'P' || input[i] == 'X' ||
-        input[i] == '^' || input[i] == '_') {
-        i++;
-        while (input[i] != '\0') {
-            if (input[i] == 0x07U) {
-                return i + 1;
-            }
-            if (input[i] == 0x1BU && input[i + 1] == '\\') {
-                return i + 2;
-            }
-            i++;
+        result = poll(&descriptor, 1, timeout_ms < 0 ? 100 : timeout_ms);
+
+        if (stopped_signal || alarm_expired) {
+            break;
         }
-        return i;
+        if (result < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return INPUT_ERROR;
+        }
+        if (result == 0) {
+            if (timeout_ms >= 0) {
+                return 0;
+            }
+            continue;
+        }
+
+        count = read(STDIN_FILENO, character, 1);
+        if (count >= 0) {
+            return (int)count;
+        }
+        if (errno != EINTR) {
+            return INPUT_ERROR;
+        }
     }
 
-    return i + 1;
+    return stopped_signal ? INPUT_SIGNAL : INPUT_TIMEOUT;
 }
 
-static void sanitize_input(const char *input, char *output,
-                           size_t output_size)
+static int skip_escape_sequence(void)
 {
-    const unsigned char *bytes = (const unsigned char *)input;
-    size_t input_position = 0;
-    size_t output_length = 0;
+    unsigned char character;
+    int result;
+    int previous = 0;
 
-    while (bytes[input_position] != '\0') {
-        unsigned char character = bytes[input_position];
-
-        if (character == 0x1BU) {
-            input_position = skip_escape_sequence(bytes, input_position);
-            continue;
-        }
-
-        if (character == '\b' || character == 0x7FU) {
-            if (output_length > 0) {
-                output_length--;
-            }
-            input_position++;
-            continue;
-        }
-
-        if (character == '\t') {
-            character = ' ';
-        } else if (character == '\r' || character < 0x20U) {
-            input_position++;
-            continue;
-        }
-
-        if (output_length + 1 < output_size) {
-            output[output_length++] = (char)character;
-        }
-        input_position++;
+    result = read_byte(&character, ESC_WAIT_MS);
+    if (result != 1) {
+        return result == 0 ? INPUT_OK : result;
     }
 
-    output[output_length] = '\0';
+    if (character == ']' || character == 'P' || character == '_' ||
+        character == '^' || character == 'X') {
+        for (;;) {
+            result = read_byte(&character, ESC_WAIT_MS);
+            if (result != 1) {
+                return result == 0 ? INPUT_INVALID : result;
+            }
+            if (character == 7 || (previous == 27 && character == '\\')) {
+                return INPUT_OK;
+            }
+            if (character < 32 && character != 27) {
+                pending_byte = character;
+                return INPUT_INVALID;
+            }
+            previous = character;
+        }
+    }
+
+    if (character != '[' && character != 'O') {
+        pending_byte = character;
+        return INPUT_OK;
+    }
+
+    for (;;) {
+        result = read_byte(&character, ESC_WAIT_MS);
+        if (result != 1) {
+            return result == 0 ? INPUT_INVALID : result;
+        }
+        if (character >= 0x40U && character <= 0x7EU) {
+            return INPUT_OK;
+        }
+        if (character < 0x20U || character > 0x3FU) {
+            pending_byte = character;
+            return INPUT_INVALID;
+        }
+    }
 }
 
-static int parse_line_number(const char *text, long *line_number)
+static int show_input(const char *text, int length)
 {
-    char *end;
-    long value;
+    struct winsize window;
+    int width = length;
+    int start;
 
-    errno = 0;
-    value = strtol(text, &end, 10);
+    if (!terminal_was_changed || !isatty(STDERR_FILENO)) {
+        return 0;
+    }
 
-    if (errno == ERANGE || end == text) {
+    if (ioctl(STDERR_FILENO, TIOCGWINSZ, &window) == 0 &&
+        window.ws_col > 0) {
+        width = window.ws_col - 1;
+    }
+
+    start = length > width ? length - width : 0;
+    if (fprintf(stderr, "\r\033[2K%.*s", length - start,
+                text + start) < 0 || fflush(stderr) == EOF) {
         return -1;
     }
 
-    while (*end == ' ' || *end == '\t') {
-        end++;
-    }
-
-    if (*end != '\0') {
-        return -1;
-    }
-
-    *line_number = value;
     return 0;
 }
 
 static int read_line_number(long *line_number)
 {
-    char input[INPUT_SIZE];
-    char sanitized[INPUT_SIZE];
-    size_t input_length = 0;
-    int too_long = 0;
-    int input_started = 0;
-    int escape_state = 0;
+    char input[MAX_INPUT_BYTES + 1];
+    char *begin;
+    char *end;
+    unsigned char character;
+    long value;
+    int length = 0;
+    int invalid = 0;
+    int result;
 
     for (;;) {
-        int character;
-
-        errno = 0;
-        character = getchar();
-
-        if (character == EOF) {
-            if (alarm_expired || errno == EINTR) {
-                clearerr(stdin);
-                return INPUT_TIMEOUT;
-            }
-            if (ferror(stdin)) {
-                perror("getchar");
-                clearerr(stdin);
-                return INPUT_ERROR;
-            }
-            if (input_length == 0) {
+        result = read_byte(&character, -1);
+        if (result < 0) {
+            return result;
+        }
+        if (result == 0) {
+            if (length == 0 && !invalid) {
                 return INPUT_EOF;
             }
             break;
         }
 
-        if (!input_started) {
-            alarm(0);
-            alarm_expired = 0;
-            input_started = 1;
-        }
-
-        if (escape_state == 1) {
-            escape_state = character == '[' ? 2 : 0;
-            continue;
-        }
-
-        if (escape_state == 2) {
-            if ((unsigned int)character >= 0x40U &&
-                (unsigned int)character <= 0x7EU) {
-                escape_state = 0;
+        if (skip_line_feed) {
+            skip_line_feed = 0;
+            if (character == '\n') {
+                continue;
             }
-            continue;
         }
 
-        if ((unsigned int)character == 0x1BU) {
-            escape_state = 1;
-            continue;
+        if (character == 3) {
+            stopped_signal = SIGINT;
+            return INPUT_SIGNAL;
         }
 
-        if (character == '\n' || character == '\r') {
-            if (input_is_terminal) {
-                putchar('\n');
-                fflush(stdout);
+        if (character == '\n' || character == '\r' || character == 4) {
+            if (character == 4 && length == 0 && !invalid) {
+                return INPUT_EOF;
             }
+            skip_line_feed = character == '\r';
             break;
         }
 
-        if (character == '\b' || (unsigned int)character == 0x7FU) {
-            if (input_length > 0) {
-                input_length--;
-                if (input_is_terminal) {
-                    fputs("\b \b", stdout);
-                    fflush(stdout);
-                }
+        if (invalid) {
+            continue;
+        }
+
+        if (character == 27) {
+            result = skip_escape_sequence();
+            if (result < 0) {
+                return result;
+            }
+            if (result == INPUT_INVALID) {
+                invalid = 1;
             }
             continue;
         }
 
-        if (character == '\t') {
-            character = ' ';
-        } else if ((unsigned int)character < 0x20U) {
-            continue;
-        }
-
-        if (input_length < MAX_INPUT_BYTES) {
-            input[input_length++] = (char)character;
-            if (input_is_terminal) {
-                fputc(character, stdout);
-                fflush(stdout);
+        if (character == 8 || character == 127) {
+            if (length > 0) {
+                length--;
             }
+        } else if (character < 32 || character > 126 ||
+                   length == MAX_INPUT_BYTES) {
+            invalid = 1;
+            continue;
         } else {
-            too_long = 1;
+            input[length++] = (char)character;
+        }
+
+        input[length] = '\0';
+        if (show_input(input, length) == -1) {
+            return INPUT_ERROR;
         }
     }
 
-    input[input_length] = '\0';
-
-    if (too_long) {
-        return INPUT_TOO_LONG;
+    if (terminal_was_changed && isatty(STDERR_FILENO)) {
+        fputc('\n', stderr);
     }
-
-    sanitize_input(input, sanitized, sizeof(sanitized));
-
-    if (parse_line_number(sanitized, line_number) == -1) {
+    if (invalid) {
         return INPUT_INVALID;
     }
 
+    input[length] = '\0';
+    begin = input;
+    while (*begin == ' ') {
+        begin++;
+    }
+
+    if (*begin < '0' || *begin > '9') {
+        return INPUT_INVALID;
+    }
+
+    errno = 0;
+    value = strtol(begin, &end, 10);
+    if (errno == ERANGE) {
+        return INPUT_INVALID;
+    }
+
+    while (*end == ' ') {
+        end++;
+    }
+    if (*end != '\0') {
+        return INPUT_INVALID;
+    }
+
+    *line_number = value;
     return INPUT_OK;
+}
+
+static int timed_read_line_number(long *line_number)
+{
+    unsigned char first_character;
+    int result;
+
+    alarm_expired = 0;
+    alarm(INPUT_SECONDS);
+    result = read_byte(&first_character, -1);
+    alarm(0);
+
+    if (result != 1) {
+        return result;
+    }
+
+    alarm_expired = 0;
+    pending_byte = first_character;
+    return read_line_number(line_number);
 }
 
 static int append_line(LineInfo **table, size_t *count, size_t *capacity,
@@ -419,7 +470,7 @@ int main(int argc, char *argv[])
     long line_number;
     int input_result;
     int status = EXIT_SUCCESS;
-    struct sigaction action;
+    int first_input = 1;
 
     if (argc != 2) {
         fprintf(stderr, "Использование: %s текстовый-файл\n", argv[0]);
@@ -472,12 +523,7 @@ int main(int argc, char *argv[])
 
     print_line_table(table, line_count);
 
-    action.sa_handler = alarm_handler;
-    sigemptyset(&action.sa_mask);
-    action.sa_flags = 0;
-
-    if (sigaction(SIGALRM, &action, NULL) == -1) {
-        perror("sigaction");
+    if (atexit(restore_terminal) != 0) {
         free(table);
         if (mapping != NULL) {
             munmap(mapping, file_size);
@@ -485,7 +531,8 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    if (restrict_terminal_commands() == -1) {
+    if (setup_terminal() == -1) {
+        perror("setup terminal");
         free(table);
         if (mapping != NULL) {
             munmap(mapping, file_size);
@@ -494,24 +541,29 @@ int main(int argc, char *argv[])
     }
 
     for (;;) {
-        printf("Введите номер строки за 5 секунд (0 — выход): ");
+        printf("Введите номер строки%s (0 — выход): ",
+               first_input ? " за 5 секунд" : "");
         fflush(stdout);
 
-        alarm_expired = 0;
-        alarm(5);
-        input_result = read_line_number(&line_number);
-        alarm(0);
+        if (first_input) {
+            input_result = timed_read_line_number(&line_number);
+            first_input = 0;
+        } else {
+            input_result = read_line_number(&line_number);
+        }
 
-        if (input_result == INPUT_TIMEOUT || alarm_expired) {
-            if (isatty(STDIN_FILENO)) {
-                tcflush(STDIN_FILENO, TCIFLUSH);
-            }
+        if (input_result == INPUT_TIMEOUT) {
             restore_terminal();
             printf("\nВремя вышло. Содержимое файла:\n");
 
             if (print_entire_file(mapping, file_size) == -1) {
                 status = EXIT_FAILURE;
             }
+            break;
+        }
+
+        if (input_result == INPUT_SIGNAL) {
+            status = EXIT_FAILURE;
             break;
         }
 
@@ -525,14 +577,10 @@ int main(int argc, char *argv[])
             break;
         }
 
-        if (input_result == INPUT_TOO_LONG) {
-            fprintf(stderr, "Ввод слишком длинный. Максимум %d байт.\n",
-                    MAX_INPUT_BYTES);
-            continue;
-        }
-
         if (input_result == INPUT_INVALID) {
-            fprintf(stderr, "Введите целый номер строки.\n");
+            fprintf(stderr,
+                    "Введите только цифры, максимум %d байт.\n",
+                    MAX_INPUT_BYTES);
             continue;
         }
 
@@ -564,6 +612,10 @@ int main(int argc, char *argv[])
     if (mapping != NULL && munmap(mapping, file_size) == -1) {
         perror("munmap");
         status = EXIT_FAILURE;
+    }
+
+    if (stopped_signal) {
+        return 128 + stopped_signal;
     }
 
     return status;
