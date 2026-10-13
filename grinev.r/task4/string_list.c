@@ -1,8 +1,12 @@
+#define _XOPEN_SOURCE 600
+
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define MAX_LINE_LENGTH 1024
+#define MAX_INPUT_BYTES 80
+#define INPUT_BUFFER_SIZE (MAX_INPUT_BYTES + 2)
 
 typedef struct Node
 {
@@ -10,118 +14,324 @@ typedef struct Node
     struct Node *next;
 } Node;
 
-static int append_line(Node **head, Node **tail, const char *text)
+enum ReadResult
 {
-    Node *new_node;
+    READ_ERROR = -1,
+    READ_EOF = 0,
+    READ_OK = 1,
+    READ_STOP = 2,
+    READ_TOO_LONG = 3,
+    READ_CONTROL_ONLY = 4
+};
+
+static void free_list(Node *head)
+{
+    Node *next;
+
+    while (head != NULL)
+    {
+        next = head->next;
+        free(head->text);
+        free(head);
+        head = next;
+    }
+}
+
+static int append_node(Node **head, Node **tail, const char *text)
+{
+    Node *node;
     size_t length;
 
-    new_node = malloc(sizeof(*new_node));
+    node = malloc(sizeof(*node));
 
-    if (new_node == NULL)
+    if (node == NULL)
     {
-        perror("malloc node");
+        perror("malloc");
         return -1;
     }
 
     length = strlen(text);
+    node->text = malloc(length + 1);
 
-    new_node->text = malloc(length + 1);
-
-    if (new_node->text == NULL)
+    if (node->text == NULL)
     {
-        perror("malloc text");
-        free(new_node);
+        perror("malloc");
+        free(node);
         return -1;
     }
 
-    memcpy(new_node->text, text, length + 1);
-    new_node->next = NULL;
+    memcpy(node->text, text, length + 1);
+    node->next = NULL;
 
-    if (*tail == NULL)
+    if (*head == NULL)
     {
-        *head = new_node;
-        *tail = new_node;
+        *head = node;
+        *tail = node;
     }
     else
     {
-        (*tail)->next = new_node;
-        *tail = new_node;
+        (*tail)->next = node;
+        *tail = node;
     }
 
     return 0;
 }
 
-static void print_list(const Node *head)
+static void discard_rest_of_line(void)
 {
-    const Node *current;
+    int character;
 
-    current = head;
-
-    while (current != NULL)
+    do
     {
-        puts(current->text);
-        current = current->next;
+        character = getchar();
     }
+    while (character != '\n' && character != EOF);
 }
 
-static void free_list(Node *head)
+static size_t remove_last_utf8_character(char *text, size_t length)
 {
-    Node *current;
-    Node *next;
-
-    current = head;
-
-    while (current != NULL)
+    if (length == 0)
     {
-        next = current->next;
-
-        free(current->text);
-        free(current);
-
-        current = next;
+        return 0;
     }
+
+    length--;
+
+    while (length > 0 &&
+           ((unsigned char)text[length] & 0xC0U) == 0x80U)
+    {
+        length--;
+    }
+
+    return length;
+}
+
+static size_t skip_escape_sequence(const unsigned char *input,
+                                   size_t position)
+{
+    size_t i;
+
+    i = position + 1;
+
+    if (input[i] == '\0')
+    {
+        return i;
+    }
+
+    if (input[i] == '[')
+    {
+        i++;
+
+        while (input[i] != '\0')
+        {
+            unsigned char character = input[i++];
+
+            if (character >= 0x40U && character <= 0x7EU)
+            {
+                break;
+            }
+        }
+
+        return i;
+    }
+
+    if (input[i] == ']' || input[i] == 'P' ||
+        input[i] == 'X' || input[i] == '^' || input[i] == '_')
+    {
+        i++;
+
+        while (input[i] != '\0')
+        {
+            if (input[i] == 0x07U)
+            {
+                i++;
+                break;
+            }
+
+            if (input[i] == 0x1BU && input[i + 1] == '\\')
+            {
+                i += 2;
+                break;
+            }
+
+            i++;
+        }
+
+        return i;
+    }
+
+    return i + 1;
+}
+
+static size_t sanitize_line(const char *input, char *output,
+                            size_t output_size)
+{
+    const unsigned char *bytes;
+    size_t input_position;
+    size_t output_length;
+
+    bytes = (const unsigned char *)input;
+    input_position = 0;
+    output_length = 0;
+
+    while (bytes[input_position] != '\0')
+    {
+        unsigned char character = bytes[input_position];
+
+        if (character == 0x1BU)
+        {
+            input_position = skip_escape_sequence(bytes, input_position);
+            continue;
+        }
+
+        if (character == '\b' || character == 0x7FU)
+        {
+            output_length = remove_last_utf8_character(
+                output, output_length);
+            input_position++;
+            continue;
+        }
+
+        if (character == '\t' || character == '\r')
+        {
+            input_position++;
+            continue;
+        }
+
+        if (character < 0x20U)
+        {
+            input_position++;
+            continue;
+        }
+
+        if (output_length + 1 < output_size)
+        {
+            output[output_length++] = (char)character;
+        }
+
+        input_position++;
+    }
+
+    output[output_length] = '\0';
+    return output_length;
+}
+
+static int read_safe_line(char *output, size_t output_size)
+{
+    char input[INPUT_BUFFER_SIZE];
+    size_t input_length;
+    size_t output_length;
+    int has_newline;
+
+    if (fgets(input, sizeof(input), stdin) == NULL)
+    {
+        if (ferror(stdin))
+        {
+            perror("fgets");
+            return READ_ERROR;
+        }
+
+        return READ_EOF;
+    }
+
+    input_length = strlen(input);
+    has_newline = input_length > 0 && input[input_length - 1] == '\n';
+
+    if (has_newline)
+    {
+        input[--input_length] = '\0';
+    }
+    else if (input_length > MAX_INPUT_BYTES || !feof(stdin))
+    {
+        discard_rest_of_line();
+        return READ_TOO_LONG;
+    }
+
+    if (input_length > 0 && input[input_length - 1] == '\r')
+    {
+        input[--input_length] = '\0';
+    }
+
+    if (input[0] == '.')
+    {
+        return READ_STOP;
+    }
+
+    output_length = sanitize_line(input, output, output_size);
+
+    if (input_length > 0 && output_length == 0)
+    {
+        return READ_CONTROL_ONLY;
+    }
+
+    return READ_OK;
 }
 
 int main(void)
 {
-    char buffer[MAX_LINE_LENGTH];
     Node *head;
     Node *tail;
-    size_t length;
+    Node *current;
+    char line[MAX_INPUT_BYTES + 1];
+    int read_result;
+    int status;
 
     head = NULL;
     tail = NULL;
+    status = EXIT_SUCCESS;
 
-    while (fgets(buffer, sizeof(buffer), stdin) != NULL)
+    printf("Enter strings, maximum %d bytes each.\n", MAX_INPUT_BYTES);
+    printf("A dot at the beginning finishes input.\n");
+
+    for (;;)
     {
-        if (buffer[0] == '.')
+        printf("> ");
+        fflush(stdout);
+
+        read_result = read_safe_line(line, sizeof(line));
+
+        if (read_result == READ_STOP || read_result == READ_EOF)
         {
             break;
         }
 
-        length = strlen(buffer);
-
-        if (length > 0 && buffer[length - 1] == '\n')
+        if (read_result == READ_ERROR)
         {
-            buffer[length - 1] = '\0';
+            status = EXIT_FAILURE;
+            break;
         }
 
-        if (append_line(&head, &tail, buffer) == -1)
+        if (read_result == READ_TOO_LONG)
         {
-            free_list(head);
-            return EXIT_FAILURE;
+            fprintf(stderr,
+                "Input is too long. Maximum length is %d bytes.\n",
+                MAX_INPUT_BYTES);
+            continue;
+        }
+
+        if (read_result == READ_CONTROL_ONLY)
+        {
+            fprintf(stderr, "Control input was ignored.\n");
+            continue;
+        }
+
+        if (append_node(&head, &tail, line) == -1)
+        {
+            status = EXIT_FAILURE;
+            break;
         }
     }
 
-    if (ferror(stdin))
+    if (status == EXIT_SUCCESS)
     {
-        perror("fgets");
-        free_list(head);
-        return EXIT_FAILURE;
+        printf("Stored strings:\n");
+
+        for (current = head; current != NULL; current = current->next)
+        {
+            puts(current->text);
+        }
     }
 
-    print_list(head);
     free_list(head);
-
-    return EXIT_SUCCESS;
+    return status;
 }
