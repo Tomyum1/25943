@@ -1,7 +1,6 @@
 #define _XOPEN_SOURCE 600
 
 #include <errno.h>
-#include <locale.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -341,11 +340,6 @@ int main(void)
     head = NULL;
     tail = NULL;
     status = EXIT_SUCCESS;
-
-    if (setlocale(LC_ALL, "") == NULL)
-    {
-        fprintf(stderr, "Warning: cannot enable the system locale.\n");
-    }
 
     if (restrict_terminal_commands() == -1)
     {

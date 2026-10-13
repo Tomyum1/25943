@@ -55,7 +55,6 @@ static int restrict_terminal_commands(void)
     }
 
     restricted_terminal = saved_terminal;
-    restricted_terminal.c_lflag &= (tcflag_t)~IEXTEN;
 
 #ifdef VREPRINT
     restricted_terminal.c_cc[VREPRINT] = _POSIX_VDISABLE;
