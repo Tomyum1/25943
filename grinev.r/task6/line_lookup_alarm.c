@@ -30,6 +30,7 @@ enum InputResult {
 static volatile sig_atomic_t alarm_expired = 0;
 static struct termios saved_terminal;
 static int terminal_was_changed = 0;
+static int input_is_terminal = 0;
 
 static void alarm_handler(int signal_number)
 {
@@ -49,7 +50,9 @@ static int restrict_terminal_commands(void)
 {
     struct termios restricted_terminal;
 
-    if (!isatty(STDIN_FILENO)) {
+    input_is_terminal = isatty(STDIN_FILENO);
+
+    if (!input_is_terminal) {
         return 0;
     }
 
@@ -59,6 +62,9 @@ static int restrict_terminal_commands(void)
     }
 
     restricted_terminal = saved_terminal;
+    restricted_terminal.c_lflag &= (tcflag_t)~(ICANON | ECHO);
+    restricted_terminal.c_cc[VMIN] = 1;
+    restricted_terminal.c_cc[VTIME] = 0;
 
 #ifdef VREPRINT
     restricted_terminal.c_cc[VREPRINT] = _POSIX_VDISABLE;
@@ -194,6 +200,8 @@ static int read_line_number(long *line_number)
     char character;
     size_t length = 0;
     int too_long = 0;
+    int input_started = 0;
+    int escape_state = 0;
 
     for (;;) {
         ssize_t result = read(STDIN_FILENO, &character, 1);
@@ -216,12 +224,61 @@ static int read_line_number(long *line_number)
             break;
         }
 
-        if (character == '\n') {
+        if (!input_started) {
+            alarm(0);
+            alarm_expired = 0;
+            input_started = 1;
+        }
+
+        if (escape_state == 1) {
+            escape_state = character == '[' ? 2 : 0;
+            continue;
+        }
+
+        if (escape_state == 2) {
+            if ((unsigned char)character >= 0x40U &&
+                (unsigned char)character <= 0x7EU) {
+                escape_state = 0;
+            }
+            continue;
+        }
+
+        if ((unsigned char)character == 0x1BU) {
+            escape_state = 1;
+            continue;
+        }
+
+        if (character == '\n' || character == '\r') {
+            if (input_is_terminal) {
+                putchar('\n');
+                fflush(stdout);
+            }
             break;
+        }
+
+        if (character == '\b' || (unsigned char)character == 0x7FU) {
+            if (length > 0) {
+                length--;
+                if (input_is_terminal) {
+                    fputs("\b \b", stdout);
+                    fflush(stdout);
+                }
+            }
+            continue;
+        }
+
+        if (character == '\t') {
+            character = ' ';
+        } else if ((unsigned char)character < 0x20U) {
+            continue;
         }
 
         if (length < MAX_INPUT_BYTES) {
             input[length++] = character;
+            if (input_is_terminal) {
+                fputc((unsigned char)character, stdout);
+                fflush(stdout);
+            }
         } else {
             too_long = 1;
         }

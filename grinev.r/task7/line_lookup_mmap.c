@@ -32,6 +32,7 @@ enum InputResult {
 static volatile sig_atomic_t alarm_expired = 0;
 static struct termios saved_terminal;
 static int terminal_was_changed = 0;
+static int input_is_terminal = 0;
 
 static void alarm_handler(int signal_number)
 {
@@ -51,7 +52,9 @@ static int restrict_terminal_commands(void)
 {
     struct termios restricted_terminal;
 
-    if (!isatty(STDIN_FILENO)) {
+    input_is_terminal = isatty(STDIN_FILENO);
+
+    if (!input_is_terminal) {
         return 0;
     }
 
@@ -61,6 +64,9 @@ static int restrict_terminal_commands(void)
     }
 
     restricted_terminal = saved_terminal;
+    restricted_terminal.c_lflag &= (tcflag_t)~(ICANON | ECHO);
+    restricted_terminal.c_cc[VMIN] = 1;
+    restricted_terminal.c_cc[VTIME] = 0;
 
 #ifdef VREPRINT
     restricted_terminal.c_cc[VREPRINT] = _POSIX_VDISABLE;
@@ -165,33 +171,6 @@ static void sanitize_input(const char *input, char *output,
     output[output_length] = '\0';
 }
 
-static int discard_rest_of_line(void)
-{
-    int character;
-
-    do {
-        errno = 0;
-        character = getchar();
-
-        if (character == EOF && alarm_expired) {
-            clearerr(stdin);
-            return INPUT_TIMEOUT;
-        }
-
-        if (character == EOF && ferror(stdin)) {
-            if (errno == EINTR) {
-                clearerr(stdin);
-                continue;
-            }
-            perror("getchar");
-            clearerr(stdin);
-            return INPUT_ERROR;
-        }
-    } while (character != '\n' && character != EOF);
-
-    return INPUT_OK;
-}
-
 static int parse_line_number(const char *text, long *line_number)
 {
     char *end;
@@ -220,37 +199,96 @@ static int read_line_number(long *line_number)
 {
     char input[INPUT_SIZE];
     char sanitized[INPUT_SIZE];
-    size_t input_length;
-    int has_newline;
+    size_t input_length = 0;
+    int too_long = 0;
+    int input_started = 0;
+    int escape_state = 0;
 
-    errno = 0;
-    if (fgets(input, sizeof(input), stdin) == NULL) {
-        if (alarm_expired || errno == EINTR) {
-            clearerr(stdin);
-            return INPUT_TIMEOUT;
+    for (;;) {
+        int character;
+
+        errno = 0;
+        character = getchar();
+
+        if (character == EOF) {
+            if (alarm_expired || errno == EINTR) {
+                clearerr(stdin);
+                return INPUT_TIMEOUT;
+            }
+            if (ferror(stdin)) {
+                perror("getchar");
+                clearerr(stdin);
+                return INPUT_ERROR;
+            }
+            if (input_length == 0) {
+                return INPUT_EOF;
+            }
+            break;
         }
-        if (ferror(stdin)) {
-            perror("fgets");
-            clearerr(stdin);
-            return INPUT_ERROR;
+
+        if (!input_started) {
+            alarm(0);
+            alarm_expired = 0;
+            input_started = 1;
         }
-        return INPUT_EOF;
+
+        if (escape_state == 1) {
+            escape_state = character == '[' ? 2 : 0;
+            continue;
+        }
+
+        if (escape_state == 2) {
+            if ((unsigned int)character >= 0x40U &&
+                (unsigned int)character <= 0x7EU) {
+                escape_state = 0;
+            }
+            continue;
+        }
+
+        if ((unsigned int)character == 0x1BU) {
+            escape_state = 1;
+            continue;
+        }
+
+        if (character == '\n' || character == '\r') {
+            if (input_is_terminal) {
+                putchar('\n');
+                fflush(stdout);
+            }
+            break;
+        }
+
+        if (character == '\b' || (unsigned int)character == 0x7FU) {
+            if (input_length > 0) {
+                input_length--;
+                if (input_is_terminal) {
+                    fputs("\b \b", stdout);
+                    fflush(stdout);
+                }
+            }
+            continue;
+        }
+
+        if (character == '\t') {
+            character = ' ';
+        } else if ((unsigned int)character < 0x20U) {
+            continue;
+        }
+
+        if (input_length < MAX_INPUT_BYTES) {
+            input[input_length++] = (char)character;
+            if (input_is_terminal) {
+                fputc(character, stdout);
+                fflush(stdout);
+            }
+        } else {
+            too_long = 1;
+        }
     }
 
-    if (alarm_expired) {
-        return INPUT_TIMEOUT;
-    }
+    input[input_length] = '\0';
 
-    input_length = strlen(input);
-    has_newline = input_length > 0 && input[input_length - 1] == '\n';
-
-    if (has_newline) {
-        input[--input_length] = '\0';
-    } else if (input_length > MAX_INPUT_BYTES || !feof(stdin)) {
-        int discard_result = discard_rest_of_line();
-        if (discard_result != INPUT_OK) {
-            return discard_result;
-        }
+    if (too_long) {
         return INPUT_TOO_LONG;
     }
 
