@@ -101,8 +101,7 @@ static int setup_terminal(void)
     return 0;
 }
 
-/* read() здесь используется только для клавиатуры.
- * Содержимое текстового файла доступно только через mmap(). */
+
 static int read_byte(unsigned char *character, int timeout_ms)
 {
     struct pollfd descriptor;
