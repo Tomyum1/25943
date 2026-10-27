@@ -1,0 +1,5 @@
+Hello!
+This is a simple text file
+????
+cat dog
+This is the last line
