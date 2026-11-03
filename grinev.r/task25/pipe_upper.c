@@ -240,6 +240,11 @@ int main(void)
     }
 
     close(channel[0]);
+    fprintf(stderr,
+            "Родитель: PID=%ld — читает ввод и пишет в канал.\n"
+            "Потомок:  PID=%ld, PPID=%ld — читает канал и переводит текст в верхний регистр.\n",
+            (long)getpid(), (long)child, (long)getpid());
+    fflush(stderr);
     status = isatty(STDIN_FILENO)
                  ? terminal_input(channel[1])
                  : transfer(STDIN_FILENO, channel[1], 0);
