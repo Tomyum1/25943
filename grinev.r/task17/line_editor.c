@@ -128,8 +128,11 @@ static void insert_character(const char text[5])
         split = length;
         while (split > 0 && line[split - 1][0] != ' ') split--;
         if (split == 0) {
-            /* A word longer than 40 characters cannot fit on one line. */
-            bell();
+            /* Split a word that is longer than the whole line. */
+            putchar('\n');
+            length = 0;
+            memcpy(line[length++], text, 5);
+            redraw();
             return;
         }
         tail = length - split;
