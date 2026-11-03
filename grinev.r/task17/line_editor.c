@@ -30,7 +30,7 @@ static void on_signal(int number)
     stopped = number;
 }
 
-static int get_byte(unsigned char *byte, int timeout)
+static int get_byte(unsigned char *byte)
 {
     struct pollfd fd;
     int result;
@@ -40,14 +40,10 @@ static int get_byte(unsigned char *byte, int timeout)
     fd.events = POLLIN;
     while (!stopped) {
         fd.revents = 0;
-        result = poll(&fd, 1, timeout < 0 ? 100 : timeout);
+        result = poll(&fd, 1, -1);
         if (result < 0) {
             if (errno == EINTR) continue;
             return -1;
-        }
-        if (result == 0) {
-            if (timeout >= 0) return 0;
-            continue;
         }
         count = read(STDIN_FILENO, byte, 1);
         if (count == 1) return 1;
@@ -72,44 +68,62 @@ static void redraw(void)
 }
 
 /* Consume a complete arrow/function-key sequence, without printing it. */
-static void skip_escape(void)
+static int escape_byte(unsigned char byte, int *state)
 {
-    unsigned char byte;
-    if (get_byte(&byte, 100) != 1) return;
-    if (byte != '[' && byte != 'O') return;
-    while (get_byte(&byte, 100) == 1) {
-        if (byte >= 0x40 && byte <= 0x7e) return;
+    if (*state == 1) {
+        if (byte == '[' || byte == 'O') { *state = 2; return 1; }
+        if (byte == ']' || byte == 'P' || byte == '^' ||
+            byte == '_' || byte == 'X') { *state = 3; return 1; }
+        *state = 0;
+        return 0;
     }
+    if (*state == 2) {
+        if (byte >= 0x40 && byte <= 0x7e) { *state = 0; return 1; }
+        if (byte >= 0x20 && byte <= 0x3f) return 1;
+        *state = 0;
+        return 0;
+    }
+    if (*state == 3 || *state == 4) {
+        if (byte == 7 || (*state == 4 && byte == '\\')) *state = 0;
+        else *state = byte == 27 ? 4 : 3;
+        return 1;
+    }
+    return 0;
 }
 
 /* One UTF-8 character occupies one buffer element (Russian is supported). */
-static int read_character(unsigned char first, char text[5])
+static int character_byte(unsigned char byte, char text[5])
 {
-    unsigned char byte;
-    unsigned long code;
-    int size;
-    int i;
+    static unsigned long code;
+    static int expected;
+    static int used;
 
-    memset(text, 0, 5);
-    text[0] = (char)first;
-    if (first < 128) return first >= 32 && first != 127;
-    if (first >= 0xc2 && first <= 0xdf) {
-        size = 2; code = first & 0x1f;
-    } else if (first >= 0xe0 && first <= 0xef) {
-        size = 3; code = first & 0x0f;
-    } else if (first >= 0xf0 && first <= 0xf4) {
-        size = 4; code = first & 7;
-    } else return 0;
-    for (i = 1; i < size; i++) {
-        if (get_byte(&byte, 100) != 1 || (byte & 0xc0) != 0x80)
-            return 0;
-        text[i] = (char)byte;
-        code = (code << 6) | (byte & 0x3f);
+    if (used && (byte & 0xc0) != 0x80) {
+        used = 0;
+        bell();
     }
-    if ((size == 3 && code < 0x800) ||
-        (size == 4 && code < 0x10000) ||
+    if (!used) {
+        memset(text, 0, 5);
+        text[0] = (char)byte;
+        if (byte < 128) return byte >= 32 && byte != 127 ? 1 : -1;
+        if (byte >= 0xc2 && byte <= 0xdf) {
+            expected = 2; code = byte & 0x1f;
+        } else if (byte >= 0xe0 && byte <= 0xef) {
+            expected = 3; code = byte & 0x0f;
+        } else if (byte >= 0xf0 && byte <= 0xf4) {
+            expected = 4; code = byte & 7;
+        } else return -1;
+        used = 1;
+        return 0;
+    }
+    text[used++] = (char)byte;
+    code = (code << 6) | (byte & 0x3f);
+    if (used < expected) return 0;
+    used = 0;
+    if ((expected == 3 && code < 0x800) ||
+        (expected == 4 && code < 0x10000) ||
         (code >= 0xd800 && code <= 0xdfff) || code > 0x10ffff ||
-        (code >= 0x80 && code <= 0x9f)) return 0;
+        (code >= 0x80 && code <= 0x9f)) return -1;
     return 1;
 }
 
@@ -154,6 +168,7 @@ int main(void)
     unsigned char byte;
     char text[5];
     int result;
+    int escape_state = 0;
     int status = EXIT_SUCCESS;
 
     if (!isatty(STDIN_FILENO)) {
@@ -181,7 +196,7 @@ int main(void)
     settings.c_iflag |= ICRNL;
     settings.c_cflag &= (tcflag_t)~(CSIZE | PARENB);
     settings.c_cflag |= CS8;
-    settings.c_cc[VMIN] = 1;
+    settings.c_cc[VMIN] = 1; ///////
     settings.c_cc[VTIME] = 0;
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &settings) == -1) {
         perror("tcsetattr");
@@ -191,11 +206,12 @@ int main(void)
     puts("Редактор: 40 символов в строке. Ctrl-D в начале строки — выход.");
     fflush(stdout);
     for (;;) {
-        result = get_byte(&byte, -1);
+        result = get_byte(&byte);
         if (result <= 0) {
             if (result < 0 && !stopped) { perror("read/poll"); status = EXIT_FAILURE; }
             break;
         }
+        if (escape_byte(byte, &escape_state)) continue;
         if (byte == 4) {
             if (length == 0) break;
             bell();
@@ -216,10 +232,12 @@ int main(void)
             fflush(stdout);
         } else if (byte == 27) {
             bell();
-            skip_escape();
-        } else if (read_character(byte, text)) {
-            insert_character(text);
-        } else bell();
+            escape_state = 1;
+        } else {
+            result = character_byte(byte, text);
+            if (result == 1) insert_character(text);
+            else if (result < 0) bell();
+        }
     }
     putchar('\n');
     restore();
