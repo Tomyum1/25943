@@ -57,7 +57,9 @@ int main(int argc, char *argv[])
         perror("socket");
         return EXIT_FAILURE;
     }
-    /* Подключаемся по тому же пути, который сервер передал в bind. */
+
+    /* Даём серверу секунду на создание сокета и запуск listen(). */
+    sleep(1);
     if (connect(connection, (struct sockaddr *)&address, sizeof(address)) == -1) {
         perror("connect");
         close(connection);
