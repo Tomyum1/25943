@@ -90,12 +90,12 @@ int main(int argc, char *argv[])
         close(connection);
         return EXIT_FAILURE;
     }
-    if (demo) {
-        status = send_demo(connection);
-    } else if (isatty(STDIN_FILENO)) {
-        status = send_terminal_input(connection);
-    } else {
-        status = send_input(connection);
+    status = demo ? send_demo(connection) : EXIT_SUCCESS;
+    if (status == EXIT_SUCCESS) {
+        /* После демо продолжаем ввод через уже открытое соединение. */
+        status = isatty(STDIN_FILENO)
+                     ? send_terminal_input(connection)
+                     : send_input(connection);
     }
     /* Закрываем соединение: сервер дочитает данные и получит EOF. */
     close(connection);
