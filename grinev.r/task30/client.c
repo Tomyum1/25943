@@ -1,11 +1,34 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "socket_io.h"
 #include "terminal_input.h"
+
+static int send_demo(int connection)
+{
+    static const char *const messages[] = {
+        "hello world\n", "cat\n", "dog\n", "good morning\n", "apple\n",
+        "banana\n", "coffee\n", "tea\n", "sun\n", "moon\n",
+        "red\n", "green\n", "blue\n", "one two three\n", "hello again\n",
+        "nice day\n", "test 123\n", "Unix socket\n", "thank you\n", "goodbye\n"
+    };
+
+    for (size_t i = 0; i < sizeof(messages) / sizeof(messages[0]); i++) {
+        /* Пауза между сообщениями, чтобы успеть прочитать вывод сервера. */
+        if (i > 0) (void)poll(NULL, 0, 500);
+        if (write_all(connection, (const unsigned char *)messages[i],
+                      strlen(messages[i])) == -1) {
+            perror("write socket");
+            return EXIT_FAILURE;
+        }
+    }
+    return EXIT_SUCCESS;
+}
 
 static int send_input(int connection)
 {
@@ -37,12 +60,14 @@ int main(int argc, char *argv[])
     const char *path;
     int connection;
     int status;
+    int demo = argc > 1 && strcmp(argv[1], "--demo") == 0;
+    int path_arg = demo ? 2 : 1;
 
-    if (argc > 2) {
-        fprintf(stderr, "Использование: %s [путь-к-сокету]\n", argv[0]);
+    if (argc > path_arg + 1) {
+        fprintf(stderr, "Использование: %s [--demo] [путь-к-сокету]\n", argv[0]);
         return EXIT_FAILURE;
     }
-    path = argc == 2 ? argv[1] : DEFAULT_SOCKET;
+    path = argc > path_arg ? argv[path_arg] : DEFAULT_SOCKET;
     if (make_address(&address, path) == -1) {
         perror("socket path");
         return EXIT_FAILURE;
@@ -65,10 +90,13 @@ int main(int argc, char *argv[])
         close(connection);
         return EXIT_FAILURE;
     }
-    /* Файлы и конвейеры передаём потоком; клавиатуру обрабатываем редактором. */
-    status = isatty(STDIN_FILENO)
-                 ? send_terminal_input(connection)
-                 : send_input(connection);
+    if (demo) {
+        status = send_demo(connection);
+    } else if (isatty(STDIN_FILENO)) {
+        status = send_terminal_input(connection);
+    } else {
+        status = send_input(connection);
+    }
     /* Закрываем соединение: сервер дочитает данные и получит EOF. */
     close(connection);
     return status;
