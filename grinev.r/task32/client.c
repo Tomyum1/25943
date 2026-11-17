@@ -19,15 +19,18 @@ static int delay_ms(const char *text)
 
 static int send_demo(int connection, unsigned char letter, int pause, int offset)
 {
-    unsigned char half[] = {letter, letter, letter, letter, '\n'};
+    const char *first = letter == 'a' ? "Hello " : "nice ";
+    const char *second = letter == 'a' ? "World\n" : "hat\n";
 
     /* Второй клиент начинает чуть позже первого. */
     if (offset > 0) (void)poll(NULL, 0, offset);
     for (int i = 0; i < 5; i++) {
         /* Пишем строку двумя порциями; перевод строки есть только во второй. */
-        if (write_all(connection, half, sizeof(half) - 1) == -1) goto failed;
+        if (write_all(connection, (const unsigned char *)first, strlen(first)) == -1)
+            goto failed;
         (void)poll(NULL, 0, pause);
-        if (write_all(connection, half, sizeof(half)) == -1) goto failed;
+        if (write_all(connection, (const unsigned char *)second, strlen(second)) == -1)
+            goto failed;
         if (i < 4) (void)poll(NULL, 0, pause);
     }
     return EXIT_SUCCESS;

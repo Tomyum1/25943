@@ -10,6 +10,3 @@ server: server.c socket_io.h
 client: client.c socket_io.h terminal_input.h
 	$(CC) $(CFLAGS) client.c -o client $(LDLIBS)
 
-.PHONY: demo
-demo: all
-	bash demo.sh
