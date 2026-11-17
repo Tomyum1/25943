@@ -64,6 +64,9 @@ static int handle_client(struct pollfd *slot)
     /* При POLLHUP в сокете ещё могут быть данные: сначала пробуем прочитать. */
     count = read(slot->fd, buffer, sizeof(buffer));
     if (count > 0) {
+        /* Метка в stderr показывает, из какого сокета прочитана порция. */
+        fprintf(stderr, "\n[poll] Сокет %d готов, read() получил %ld байт: ",
+                slot->fd, (long)count);
         for (ssize_t i = 0; i < count; i++) {
             buffer[i] = (unsigned char)toupper(buffer[i]);
         }

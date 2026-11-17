@@ -65,6 +65,8 @@ static void reap_read(int slot)
         client->buffer[i] = (unsigned char)toupper(client->buffer[i]);
     }
     /* Одна порция выводится целиком; порции разных клиентов чередуются. */
+    fprintf(stderr, "\n[AIO] Сокет %d: aio_return() вернул %ld байт: ",
+            client->request.aio_fildes, (long)count);
     if (write_all(STDOUT_FILENO, client->buffer, (size_t)count) == -1) {
         perror("write stdout");
         finish_client(slot, 1);
@@ -97,6 +99,7 @@ static void *collect_reads(void *unused)
         }
         pthread_mutex_unlock(&lock);
     }
+    return NULL;
 }
 
 static int start_client(int fd)
@@ -127,6 +130,7 @@ static int start_client(int fd)
     /* У каждого клиента свой запрос. Ожидание его данных не блокирует accept. */
     client->request.aio_sigevent.sigev_notify = SIGEV_SIGNAL;
     client->request.aio_sigevent.sigev_signo = SIGUSR1;
+    fprintf(stderr, "[AIO] Сокет %d: запускаем aio_read() (уведомление SIGUSR1).\n", fd);
     if (aio_read(&client->request) == -1) {
         perror("aio_read");
         finish_client(slot, 1);
