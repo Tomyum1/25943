@@ -44,9 +44,12 @@ static int delay_ms(const char *text)
 
 static int send_demo(int connection, unsigned char letter, int pause, int offset)
 {
+    unsigned char client_id = letter == 'a' ? 1 : 2;
     const char *first = letter == 'a' ? "Hello " : "nice ";
     const char *second = letter == 'a' ? "World\n" : "hat\n";
 
+    /* Первый байт — номер демо-клиента, а не часть фразы. */
+    if (write_all(connection, &client_id, 1) == -1) goto failed;
     if (pause < 0) srand((unsigned int)time(NULL) ^ (unsigned int)getpid());
     /* Второй клиент начинает чуть позже первого. */
     if (offset > 0) (void)poll(NULL, 0, offset);
@@ -114,6 +117,43 @@ done:
     free(line);
     fclose(file);
     return status;
+}
+
+static int wait_for_server(int connection)
+{
+    unsigned char ready;
+    ssize_t count;
+
+    do {
+        count = read(connection, &ready, 1);
+    } while (count < 0 && errno == EINTR);
+    if (count == 1 && ready == 1) return 0;
+    if (count >= 0) errno = EIO;
+    return -1;
+}
+
+static int send_numbered_line(int connection, int number, int sync)
+{
+    static const unsigned char first[] = "Hello World\n";
+    static const unsigned char second[] = "nice hat\n";
+    unsigned char id = (unsigned char)(number + (sync ? 2 : 0));
+
+    if (write_all(connection, &id, 1) == -1) goto failed;
+    if (number == 1) {
+        for (size_t i = 0; i < sizeof(first) - 1; i++) {
+            if (write_all(connection, first + i, 1) == -1) goto failed;
+            /* После первой буквы ждём, пока сервер выведет строку клиента 2. */
+            if (sync && i == 0 && wait_for_server(connection) == -1) goto failed;
+        }
+    } else {
+        if (sync && wait_for_server(connection) == -1) goto failed;
+        if (write_all(connection, second, sizeof(second) - 1) == -1) goto failed;
+    }
+    return EXIT_SUCCESS;
+
+failed:
+    perror("numbered demo");
+    return EXIT_FAILURE;
 }
 
 static int send_input(int connection)
@@ -204,8 +244,19 @@ int main(int argc, char *argv[])
     int file_mode = argc > 1 && strcmp(argv[1], "--file") == 0;
     int pause = 0;
     int offset = 0;
+    const char *name = strrchr(argv[0], '/');
+    int named_client;
+    int sync;
 
-    if ((!demo && !file_mode && argc > 2) ||
+    name = name ? name + 1 : argv[0];
+    named_client = strcmp(name, "client1") == 0 ? 1 :
+                   strcmp(name, "client2") == 0 ? 2 : 0;
+    sync = named_client && argc > 1 && strcmp(argv[1], "--sync") == 0;
+    if (named_client && (demo || file_mode || argc > (sync ? 3 : 2))) {
+        fprintf(stderr, "Использование: %s [--sync] [путь-к-сокету]\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+    if ((!named_client && !demo && !file_mode && argc > 2) ||
         (file_mode && (argc != 6 ||
                        (pause = delay_ms(argv[4])) < 0 || (offset = delay_ms(argv[5])) < 0)) ||
         (demo && !auto_demo && (argc != 6 ||
@@ -218,7 +269,8 @@ int main(int argc, char *argv[])
                 argv[0], argv[0], argv[0], argv[0]);
         return EXIT_FAILURE;
     }
-    path = auto_demo ? DEFAULT_SOCKET :
+    path = sync ? (argc == 3 ? argv[2] : DEFAULT_SOCKET) :
+           auto_demo ? DEFAULT_SOCKET :
            (demo || file_mode) ? argv[3] : (argc == 2 ? argv[1] : DEFAULT_SOCKET);
     if (make_address(&address, path) == -1) {
         perror("socket path");
@@ -229,13 +281,15 @@ int main(int argc, char *argv[])
         perror("signal");
         return EXIT_FAILURE;
     }
-    connection = connect_server(&address, auto_demo);
+    connection = connect_server(&address, auto_demo || named_client);
     if (connection == -1) {
         perror("connect");
         return EXIT_FAILURE;
     }
     /* Файлы и конвейеры передаём потоком; клавиатуру обрабатываем редактором. */
-    if (auto_demo) {
+    if (named_client) {
+        status = send_numbered_line(connection, named_client, sync);
+    } else if (auto_demo) {
         status = run_auto_demo(connection, &address);
     } else if (demo) {
         status = send_demo(connection, (unsigned char)argv[2][0], pause, offset);

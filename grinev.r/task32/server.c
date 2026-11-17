@@ -14,12 +14,14 @@
 struct client {
     struct aiocb request;
     unsigned char buffer[4096];
+    int client_id;
 };
 
 static const char *socket_path;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t client_finished = PTHREAD_COND_INITIALIZER;
 static struct client *clients[MAX_CLIENTS];
+static struct demo_order order = {-1, -1, 0};
 static sigset_t completions;
 static int active;
 static int failed;
@@ -57,20 +59,52 @@ static void reap_read(int slot)
         return;
     }
     if (count == 0) {
+        if ((client->client_id == 3 || client->client_id == 4) &&
+            (order.first_fd >= 0 || order.second_fd >= 0)) {
+            fprintf(stderr, "Клиент отключился до завершения синхронизации демо.\n");
+            stop_server(SIGTERM);
+        }
         finish_client(slot, 0);
         return;
     }
 
-    for (ssize_t i = 0; i < count; i++) {
-        client->buffer[i] = (unsigned char)toupper(client->buffer[i]);
+    /* Демо присылает номер один раз, в первом байте соединения. */
+    if (client->client_id == -1) {
+        client->client_id = demo_id(client->buffer[0]);
+        if (client->client_id == 3) order.first_fd = client->request.aio_fildes;
+        if (client->client_id == 4) {
+            order.second_fd = client->request.aio_fildes;
+            if (demo_after_first(&order) == -1) goto demo_error;
+        }
+        if (client->client_id) {
+            count--;
+            memmove(client->buffer, client->buffer + 1, (size_t)count);
+        }
     }
-    /* Одна порция выводится целиком; порции разных клиентов чередуются. */
-    fprintf(stderr, "\n[AIO] Сокет %d: aio_return() вернул %ld байт: ",
-            client->request.aio_fildes, (long)count);
-    if (write_all(STDOUT_FILENO, client->buffer, (size_t)count) == -1) {
-        perror("write stdout");
-        finish_client(slot, 1);
-        return;
+    if (count > 0) {
+        for (ssize_t i = 0; i < count; i++) {
+            client->buffer[i] = (unsigned char)toupper(client->buffer[i]);
+        }
+        if (client->client_id)
+            fprintf(stderr, "[AIO] Клиент %d, aio_return(): %ld байт текста: ",
+                    (client->client_id - 1) % 2 + 1, (long)count);
+        else
+            fprintf(stderr, "[AIO] Сокет %d, aio_return(): %ld байт текста: ",
+                    client->request.aio_fildes, (long)count);
+        if (write_all(STDOUT_FILENO, client->buffer, (size_t)count) == -1) {
+            perror("write stdout");
+            finish_client(slot, 1);
+            return;
+        }
+        if (client->buffer[count - 1] != '\n') fputc('\n', stderr);
+        if (client->client_id == 3 && !order.first_printed) {
+            order.first_printed = 1;
+            if (demo_after_first(&order) == -1) goto demo_error;
+        }
+        if (client->client_id == 4 && client->buffer[count - 1] == '\n') {
+            if (demo_continue(order.first_fd) == -1) goto demo_error;
+            order.first_fd = -1;
+        }
     }
 
     /* После aio_return можно снова использовать тот же запрос и буфер. */
@@ -78,6 +112,11 @@ static void reap_read(int slot)
         perror("aio_read");
         finish_client(slot, 1);
     }
+    return;
+
+demo_error:
+    perror("demo acknowledgement");
+    stop_server(SIGTERM);
 }
 
 static void *collect_reads(void *unused)
@@ -125,6 +164,7 @@ static int start_client(int fd)
     active++;
 
     client->request.aio_fildes = fd;
+    client->client_id = -1;
     client->request.aio_buf = client->buffer;
     client->request.aio_nbytes = sizeof(client->buffer);
     /* У каждого клиента свой запрос. Ожидание его данных не блокирует accept. */
