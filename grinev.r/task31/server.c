@@ -89,10 +89,12 @@ static int handle_client(struct pollfd *slot)
     return 0;
 }
 
-static int serve(int listener)
+static int serve(int listener, int demo)
 {
     struct pollfd fds[MAX_CLIENTS + 1];
     int status = EXIT_FAILURE;
+    int accepted = 0;
+    int finished = 0;
 
     fds[0] = (struct pollfd){listener, POLLIN, 0};
     for (int i = 1; i <= MAX_CLIENTS; i++) {
@@ -109,7 +111,7 @@ static int serve(int listener)
                 break;
             }
         }
-        fds[0].events = free_slot ? POLLIN : 0;
+        fds[0].events = free_slot && (!demo || accepted < 2) ? POLLIN : 0;
 
         /* -1: спим до события без таймера. POLLIN у fds[0] означает подключение. */
         if (poll(fds, MAX_CLIENTS + 1, -1) == -1) {
@@ -123,11 +125,17 @@ static int serve(int listener)
         }
         if (free_slot && (fds[0].revents & POLLIN)) {
             accept_client(listener, &fds[free_slot]);
+            if (demo && fds[free_slot].fd != -1) accepted++;
         }
         for (int i = 1; i <= MAX_CLIENTS; i++) {
-            if (fds[i].fd != -1 && handle_client(&fds[i]) == -1) {
-                goto cleanup;
-            }
+            if (fds[i].fd == -1) continue;
+            if (handle_client(&fds[i]) == -1) goto cleanup;
+            if (demo && fds[i].fd == -1) finished++;
+        }
+        /* В демо выходим только после того, как дочитали обоих клиентов. */
+        if (demo && finished == 2) {
+            status = EXIT_SUCCESS;
+            break;
         }
     }
 
@@ -144,12 +152,14 @@ int main(int argc, char *argv[])
     struct sigaction action = {0};
     int listener;
     int status = EXIT_FAILURE;
+    int demo = argc > 1 && strcmp(argv[1], "--demo") == 0;
+    int path_arg = demo ? 2 : 1;
 
-    if (argc > 2) {
-        fprintf(stderr, "Использование: %s [путь-к-сокету]\n", argv[0]);
+    if (argc > path_arg + 1) {
+        fprintf(stderr, "Использование: %s [--demo] [путь-к-сокету]\n", argv[0]);
         return EXIT_FAILURE;
     }
-    socket_path = argc == 2 ? argv[1] : DEFAULT_SOCKET;
+    socket_path = argc > path_arg ? argv[path_arg] : DEFAULT_SOCKET;
     if (make_address(&address, socket_path) == -1) {
         perror("socket path");
         return EXIT_FAILURE;
@@ -178,7 +188,7 @@ int main(int argc, char *argv[])
         perror("listen");
     } else {
         fprintf(stderr, "Сервер ждёт клиентов: %s (Ctrl-C — выход).\n", socket_path);
-        status = serve(listener);
+        status = serve(listener, demo);
     }
 
     close(listener);

@@ -1,5 +1,6 @@
 CC = gcc
 CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -g
+LDLIBS = `if test "\`uname -s\`" = SunOS; then printf '%s' '-lsocket -lnsl'; fi`
 
 all: server client
 
@@ -8,3 +9,7 @@ server: server.c socket_io.h
 
 client: client.c socket_io.h terminal_input.h
 	$(CC) $(CFLAGS) client.c -o client $(LDLIBS)
+
+.PHONY: demo
+demo: all
+	bash demo.sh
