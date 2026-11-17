@@ -180,6 +180,15 @@ static int send_input(int connection)
     }
 }
 
+static int send_manual_input(int connection, unsigned char number)
+{
+    if (write_all(connection, &number, 1) == -1) {
+        perror("write client number");
+        return EXIT_FAILURE;
+    }
+    return send_terminal_input(connection, number);
+}
+
 static int run_auto_demo(int connection, const struct sockaddr_un *address)
 {
     pid_t child = fork();
@@ -217,18 +226,11 @@ static int run_auto_demo(int connection, const struct sockaddr_un *address)
     if (status != EXIT_SUCCESS || !WIFEXITED(child_status) ||
         WEXITSTATUS(child_status) != EXIT_SUCCESS) return EXIT_FAILURE;
 
-    /* Ручной ввод продолжается через соединение первого клиента. */
+    /* В ручном режиме переиспользуем соединение первого клиента. */
     if (isatty(STDIN_FILENO)) {
-        pid_t foreground = tcgetpgrp(STDIN_FILENO);
-
-        if (foreground != -1 && foreground != getpgrp()) {
+        if (terminal_in_background())
             fprintf(stderr, "\nДемо завершено. Введи fg для ручного ввода.\n");
-            if (raise(SIGSTOP) != 0) {
-                perror("raise SIGSTOP");
-                return EXIT_FAILURE;
-            }
-        }
-        return send_terminal_input(connection);
+        return send_terminal_input(connection, 1);
     }
     return send_input(connection);
 }
@@ -247,13 +249,19 @@ int main(int argc, char *argv[])
     const char *name = strrchr(argv[0], '/');
     int named_client;
     int sync;
+    int manual;
 
     name = name ? name + 1 : argv[0];
     named_client = strcmp(name, "client1") == 0 ? 1 :
                    strcmp(name, "client2") == 0 ? 2 : 0;
     sync = named_client && argc > 1 && strcmp(argv[1], "--sync") == 0;
-    if (named_client && (demo || file_mode || argc > (sync ? 3 : 2))) {
-        fprintf(stderr, "Использование: %s [--sync] [путь-к-сокету]\n", argv[0]);
+    manual = named_client && argc > 1 && strcmp(argv[1], "--manual") == 0;
+    if (named_client && (demo || file_mode || argc > ((sync || manual) ? 3 : 2))) {
+        fprintf(stderr, "Использование: %s [--sync | --manual] [путь-к-сокету]\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+    if (manual && !isatty(STDIN_FILENO)) {
+        fprintf(stderr, "Для --manual нужен терминал.\n");
         return EXIT_FAILURE;
     }
     if ((!named_client && !demo && !file_mode && argc > 2) ||
@@ -269,7 +277,7 @@ int main(int argc, char *argv[])
                 argv[0], argv[0], argv[0], argv[0]);
         return EXIT_FAILURE;
     }
-    path = sync ? (argc == 3 ? argv[2] : DEFAULT_SOCKET) :
+    path = (sync || manual) ? (argc == 3 ? argv[2] : DEFAULT_SOCKET) :
            auto_demo ? DEFAULT_SOCKET :
            (demo || file_mode) ? argv[3] : (argc == 2 ? argv[1] : DEFAULT_SOCKET);
     if (make_address(&address, path) == -1) {
@@ -287,7 +295,9 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
     /* Файлы и конвейеры передаём потоком; клавиатуру обрабатываем редактором. */
-    if (named_client) {
+    if (manual) {
+        status = send_manual_input(connection, (unsigned char)named_client);
+    } else if (named_client) {
         status = send_numbered_line(connection, named_client, sync);
     } else if (auto_demo) {
         status = run_auto_demo(connection, &address);
@@ -297,7 +307,7 @@ int main(int argc, char *argv[])
         status = send_file(connection, argv[2], pause, offset);
     } else {
         status = isatty(STDIN_FILENO)
-                     ? send_terminal_input(connection)
+                     ? send_terminal_input(connection, 0)
                      : send_input(connection);
     }
     /* Закрываем соединение: сервер закроет только это соединение. */

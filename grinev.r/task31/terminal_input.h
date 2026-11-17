@@ -61,8 +61,9 @@ static int skip_escape(enum escape_state *state, unsigned char key)
     return 0;
 }
 
-static void show_line(const unsigned char *line, size_t length)
+static void show_line(int client, const unsigned char *line, size_t length)
 {
+    const size_t prompt_width = client ? 11 : 0; /* «[Клиент 1] » */
     size_t width = 76;
     size_t start;
 
@@ -75,18 +76,47 @@ static void show_line(const unsigned char *line, size_t length)
             width = window.ws_col - 1;
     }
 #endif
+    width = width > prompt_width ? width - prompt_width : 0;
     /* Показываем хвост строки, если она не помещается по ширине окна. */
     start = length > width ? length - width : 0;
-    fprintf(stderr, "\r\033[2K%.*s", (int)(length - start), (const char *)line + start);
+    fputs("\r\033[2K", stderr);
+    if (client) fprintf(stderr, "[Клиент %d] ", client);
+    fprintf(stderr, "%.*s", (int)(length - start), (const char *)line + start);
     fflush(stderr);
 }
 
-static int edit_input(int connection, const struct termios *original)
+static int terminal_in_background(void)
 {
-    unsigned char line[LINE_LIMIT + 1];
+    pid_t foreground = tcgetpgrp(STDIN_FILENO);
+    return foreground != -1 && foreground != getpgrp();
+}
+
+static int wait_for_foreground(void)
+{
+    while (!interrupted && terminal_in_background()) {
+        if (raise(SIGSTOP) != 0) return -1;
+    }
+    return 0;
+}
+
+static int set_terminal(const struct termios *settings)
+{
+    int result;
+
+    do {
+        result = tcsetattr(STDIN_FILENO, TCSAFLUSH, settings);
+    } while (result == -1 && errno == EINTR);
+    return result;
+}
+
+static int edit_input(int connection, int client, const struct termios *original,
+                      const struct termios *settings)
+{
+    unsigned char line[LINE_LIMIT + 1] = {0};
     size_t length = 0;
     enum escape_state state = TEXT;
 
+    if (client) show_line(client, line, length);
     while (!interrupted) {
         struct pollfd input = {STDIN_FILENO, POLLIN, 0};
         unsigned char key;
@@ -111,17 +141,30 @@ static int edit_input(int connection, const struct termios *original)
 
         if (key == 3) { interrupted = SIGINT; break; }
         if (skip_escape(&state, key)) continue;
-        if (key == 4) {
+        if (key == 26) { /* Ctrl-Z: возвращаем терминал Bash, сохраняя строку и сокет. */
+            fputc('\n', stderr);
+            if (set_terminal(original) == -1 || raise(SIGSTOP) != 0 ||
+                wait_for_foreground() == -1) {
+                perror("suspend client");
+                return EXIT_FAILURE;
+            }
+            if (interrupted) break;
+            if (set_terminal(settings) == -1) {
+                perror("resume client");
+                return EXIT_FAILURE;
+            }
+            show_line(client, line, length);
+        } else if (key == 4) {
             if (length == 0) break;
             fputc('\a', stderr);
         } else if (key == 8 || key == 127 ||
                    (original->c_cc[VERASE] != _POSIX_VDISABLE &&
                     key == original->c_cc[VERASE])) {
             if (length > 0) length--;
-            show_line(line, length);
+            show_line(client, line, length);
         } else if (key == 21) {
             length = 0;
-            show_line(line, length);
+            show_line(client, line, length);
         } else if (key == '\n' || key == '\r') {
             fputc('\n', stderr);
             line[length++] = '\n';
@@ -135,7 +178,7 @@ static int edit_input(int connection, const struct termios *original)
             /* Пробел — часть текста. Tab и прочие управляющие байты сюда не попадают. */
             if (length < LINE_LIMIT) {
                 line[length++] = key;
-                show_line(line, length);
+                show_line(client, line, length);
             } else {
                 fputc('\a', stderr);
             }
@@ -146,18 +189,12 @@ static int edit_input(int connection, const struct termios *original)
     return interrupted ? 128 + (int)interrupted : EXIT_SUCCESS;
 }
 
-static int send_terminal_input(int connection)
+static int send_terminal_input(int connection, int client)
 {
     struct termios original;
     struct termios settings;
     struct sigaction action = {0};
     int status;
-    int result;
-
-    if (tcgetattr(STDIN_FILENO, &original) == -1) {
-        perror("tcgetattr");
-        return EXIT_FAILURE;
-    }
 
     action.sa_handler = interrupt_input;
     sigemptyset(&action.sa_mask);
@@ -168,7 +205,15 @@ static int send_terminal_input(int connection)
         perror("sigaction");
         return EXIT_FAILURE;
     }
+    if (wait_for_foreground() == -1) {
+        perror("wait for terminal");
+        return EXIT_FAILURE;
+    }
     if (interrupted) return 128 + (int)interrupted;
+    if (tcgetattr(STDIN_FILENO, &original) == -1) {
+        perror("tcgetattr");
+        return EXIT_FAILURE;
+    }
 
     /* Отключаем встроенное редактирование терминала и читаем клавиши по байтам. */
     settings = original;
@@ -177,20 +222,18 @@ static int send_terminal_input(int connection)
     settings.c_iflag |= ICRNL;
     settings.c_cc[VMIN] = 1;
     settings.c_cc[VTIME] = 0;
-    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &settings) == -1) {
+    if (set_terminal(&settings) == -1) {
         perror("tcsetattr");
         return EXIT_FAILURE;
     }
 
-    fprintf(stderr, "Введите английский текст (до %d байт). Ctrl-D на пустой строке — выход.\n",
+    fprintf(stderr, "Введите английский текст (до %d байт). Ctrl-Z — приостановить, "
+                    "Ctrl-D на пустой строке — выход.\n",
             LINE_LIMIT);
-    status = edit_input(connection, &original);
+    status = edit_input(connection, client, &original, &settings);
 
     /* Восстанавливаем настройки и убираем остаток ввода перед возвратом в shell. */
-    do {
-        result = tcsetattr(STDIN_FILENO, TCSAFLUSH, &original);
-    } while (result == -1 && errno == EINTR);
-    if (result == -1) {
+    if (!terminal_in_background() && set_terminal(&original) == -1) {
         perror("restore terminal");
         return EXIT_FAILURE;
     }
