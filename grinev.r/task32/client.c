@@ -40,6 +40,56 @@ failed:
     return EXIT_FAILURE;
 }
 
+static int send_file(int connection, const char *path, int pause, int offset)
+{
+    FILE *file = fopen(path, "r");
+    char *line = NULL;
+    size_t capacity = 0;
+    ssize_t length;
+    int next_delay = offset;
+    int status = EXIT_SUCCESS;
+
+    if (file == NULL) {
+        perror(path);
+        return EXIT_FAILURE;
+    }
+
+    while ((length = getline(&line, &capacity, file)) >= 0) {
+        size_t size = (size_t)length;
+        size_t split = size / 2;
+
+        /* По возможности делим строку между словами. */
+        for (size_t i = split; i < size && line[i] != '\n'; i++) {
+            if (line[i] == ' ') {
+                split = i + 1;
+                break;
+            }
+        }
+        if (next_delay > 0) (void)poll(NULL, 0, next_delay);
+        if (write_all(connection, (const unsigned char *)line, split) == -1)
+            goto failed;
+        if (pause > 0 && split > 0 && split < size)
+            (void)poll(NULL, 0, pause);
+        if (write_all(connection, (const unsigned char *)line + split,
+                      size - split) == -1)
+            goto failed;
+        next_delay = pause;
+    }
+    if (!feof(file)) {
+        perror(path);
+        status = EXIT_FAILURE;
+    }
+    goto done;
+
+failed:
+    perror("write socket");
+    status = EXIT_FAILURE;
+done:
+    free(line);
+    fclose(file);
+    return status;
+}
+
 static int send_input(int connection)
 {
     unsigned char buffer[4096];
@@ -71,19 +121,23 @@ int main(int argc, char *argv[])
     int connection;
     int status;
     int demo = argc > 1 && strcmp(argv[1], "--demo") == 0;
+    int file_mode = argc > 1 && strcmp(argv[1], "--file") == 0;
     int pause = 0;
     int offset = 0;
 
-    if ((!demo && argc > 2) ||
+    if ((!demo && !file_mode && argc > 2) ||
+        (file_mode && (argc != 6 ||
+                       (pause = delay_ms(argv[4])) < 0 || (offset = delay_ms(argv[5])) < 0)) ||
         (demo && (argc != 6 ||
                   (strcmp(argv[2], "a") != 0 && strcmp(argv[2], "b") != 0) ||
                   (pause = delay_ms(argv[4])) < 0 || (offset = delay_ms(argv[5])) < 0))) {
         fprintf(stderr, "Использование: %s [путь-к-сокету]\n"
-                        "              %s --demo a|b путь пауза-мс сдвиг-мс (0–5000)\n",
-                argv[0], argv[0]);
+                        "              %s --demo a|b путь пауза-мс сдвиг-мс (0–5000)\n"
+                        "              %s --file файл путь пауза-мс сдвиг-мс (0–5000)\n",
+                argv[0], argv[0], argv[0]);
         return EXIT_FAILURE;
     }
-    path = demo ? argv[3] : (argc == 2 ? argv[1] : DEFAULT_SOCKET);
+    path = (demo || file_mode) ? argv[3] : (argc == 2 ? argv[1] : DEFAULT_SOCKET);
     if (make_address(&address, path) == -1) {
         perror("socket path");
         return EXIT_FAILURE;
@@ -107,6 +161,8 @@ int main(int argc, char *argv[])
     /* Файлы и конвейеры передаём потоком; клавиатуру обрабатываем редактором. */
     if (demo) {
         status = send_demo(connection, (unsigned char)argv[2][0], pause, offset);
+    } else if (file_mode) {
+        status = send_file(connection, argv[2], pause, offset);
     } else {
         status = isatty(STDIN_FILENO)
                      ? send_terminal_input(connection)
