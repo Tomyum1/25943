@@ -126,7 +126,7 @@ static int send_numbered_line(int connection, int number)
     unsigned char id = (unsigned char)number;
 
     if (write_all(connection, &id, 1) == -1) goto failed;
-    for (int line = 0; line < 1000; line++) {
+    for (int line = 0; line < 5; line++) {
         if (number == 1) {
             for (size_t i = 0; i < sizeof(first) - 1; i++) {
                 if (write_all(connection, first + i, 1) == -1) goto failed;

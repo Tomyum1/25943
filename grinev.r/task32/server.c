@@ -13,7 +13,7 @@
 
 struct client {
     struct aiocb request;
-    unsigned char buffer[4096];
+    unsigned char buffer[1];
     int client_id;
 };
 
@@ -65,6 +65,9 @@ static void reap_read(int slot)
     /* Демо присылает номер один раз, в первом байте соединения. */
     if (client->client_id == -1) {
         client->client_id = demo_id(client->buffer[0]);
+        if (client->client_id)
+            fprintf(stderr, "[AIO] Клиент %d подключён, сокет %d.\n",
+                    client->client_id, client->request.aio_fildes);
         if (client->client_id) {
             count--;
             memmove(client->buffer, client->buffer + 1, (size_t)count);
@@ -74,18 +77,11 @@ static void reap_read(int slot)
         for (ssize_t i = 0; i < count; i++) {
             client->buffer[i] = (unsigned char)toupper(client->buffer[i]);
         }
-        if (client->client_id)
-            fprintf(stderr, "[AIO] Клиент %d, aio_return(): %ld байт текста: ",
-                    client->client_id, (long)count);
-        else
-            fprintf(stderr, "[AIO] Сокет %d, aio_return(): %ld байт текста: ",
-                    client->request.aio_fildes, (long)count);
         if (write_all(STDOUT_FILENO, client->buffer, (size_t)count) == -1) {
             perror("write stdout");
             finish_client(slot, 1);
             return;
         }
-        if (client->buffer[count - 1] != '\n') fputc('\n', stderr);
     }
 
     /* После aio_return можно снова использовать тот же запрос и буфер. */

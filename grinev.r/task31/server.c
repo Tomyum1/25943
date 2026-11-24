@@ -54,7 +54,7 @@ static void accept_client(int listener, struct pollfd *slot)
 
 static int handle_client(struct pollfd *slot, int *client_id)
 {
-    unsigned char buffer[4096];
+    unsigned char buffer[1];
     ssize_t count;
 
     if (!(slot->revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL))) {
@@ -67,17 +67,15 @@ static int handle_client(struct pollfd *slot, int *client_id)
         /* Демо присылает номер один раз, в первом байте соединения. */
         if (*client_id == -1) {
             *client_id = demo_id(buffer[0]);
+            if (*client_id)
+                fprintf(stderr, "[poll] Клиент %d подключён, сокет %d.\n",
+                        *client_id, slot->fd);
             if (*client_id) {
                 count--;
                 memmove(buffer, buffer + 1, (size_t)count);
             }
             if (count == 0) return 0;
         }
-        if (*client_id)
-            fprintf(stderr, "[poll] Клиент %d, read(): %ld байт: ",
-                    *client_id, (long)count);
-        else
-            fprintf(stderr, "[poll] Сокет %d, read(): %ld байт: ", slot->fd, (long)count);
         for (ssize_t i = 0; i < count; i++) {
             buffer[i] = (unsigned char)toupper(buffer[i]);
         }
@@ -85,7 +83,6 @@ static int handle_client(struct pollfd *slot, int *client_id)
             perror("write stdout");
             return -1;
         }
-        if (buffer[count - 1] != '\n') fputc('\n', stderr);
         /* Одна порция за проход, чтобы обслужить остальных готовых клиентов. */
         return 0;
     }
