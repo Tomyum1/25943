@@ -46,33 +46,10 @@ static inline int write_all(int fd, const unsigned char *data, size_t length)
     return 0;
 }
 
-/* 1/2 обозначают обычное демо, 3/4 — демо с подтверждениями. */
+/* Первый байт может обозначать номер клиента. */
 static inline int demo_id(unsigned char byte)
 {
-    return byte >= 1 && byte <= 4 ? byte : 0;
-}
-
-struct demo_order {
-    int first_fd;
-    int second_fd;
-    int first_printed;
-};
-
-static inline int demo_continue(int fd)
-{
-    const unsigned char ready = 1;
-    return write_all(fd, &ready, 1);
-}
-
-/* Разрешаем клиенту 2 писать лишь после вывода первой буквы клиента 1. */
-static inline int demo_after_first(struct demo_order *order)
-{
-    if (order->first_printed && order->second_fd >= 0) {
-        int fd = order->second_fd;
-        order->second_fd = -1;
-        return demo_continue(fd);
-    }
-    return 0;
+    return byte == 1 || byte == 2 ? byte : 0;
 }
 
 #endif

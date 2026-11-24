@@ -25,9 +25,9 @@ trap 'exit 129' HUP
 # Оба клиента запускаются сразу. Сервер завершится после двух EOF.
 ./server --demo "$sock" &
 server_pid=$!
-./client1 --sync "$sock" &
+./client1 "$sock" &
 client1_pid=$!
-./client2 --sync "$sock" &
+./client2 "$sock" &
 client2_pid=$!
 
 wait "$client1_pid"

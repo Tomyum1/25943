@@ -15,7 +15,7 @@ static const char *socket_path;
 
 static void stop_server(int signum)
 {
-    /* При Ctrl-C ядро закроет дескрипторы, а мы уберём имя сокета. */
+
     (void)unlink(socket_path);
     _exit(128 + signum);
 }
@@ -41,7 +41,7 @@ static void accept_client(int listener, struct pollfd *slot)
         if (errno != EINTR && !would_block()) perror("accept");
         return;
     }
-    /* Даже если состояние сокета изменилось после poll, read не зависнет. */
+    /* Даже если состояние сокета изменилось после poll, read не зависнет */
     if (set_nonblocking(client) == -1) {
         perror("fcntl client");
         close(client);
@@ -52,7 +52,7 @@ static void accept_client(int listener, struct pollfd *slot)
     slot->revents = 0;
 }
 
-static int handle_client(struct pollfd *slot, int *client_id, struct demo_order *order)
+static int handle_client(struct pollfd *slot, int *client_id)
 {
     unsigned char buffer[4096];
     ssize_t count;
@@ -67,11 +67,6 @@ static int handle_client(struct pollfd *slot, int *client_id, struct demo_order 
         /* Демо присылает номер один раз, в первом байте соединения. */
         if (*client_id == -1) {
             *client_id = demo_id(buffer[0]);
-            if (*client_id == 3) order->first_fd = slot->fd;
-            if (*client_id == 4) {
-                order->second_fd = slot->fd;
-                if (demo_after_first(order) == -1) goto demo_error;
-            }
             if (*client_id) {
                 count--;
                 memmove(buffer, buffer + 1, (size_t)count);
@@ -80,7 +75,7 @@ static int handle_client(struct pollfd *slot, int *client_id, struct demo_order 
         }
         if (*client_id)
             fprintf(stderr, "[poll] Клиент %d, read(): %ld байт: ",
-                    (*client_id - 1) % 2 + 1, (long)count);
+                    *client_id, (long)count);
         else
             fprintf(stderr, "[poll] Сокет %d, read(): %ld байт: ", slot->fd, (long)count);
         for (ssize_t i = 0; i < count; i++) {
@@ -91,14 +86,6 @@ static int handle_client(struct pollfd *slot, int *client_id, struct demo_order 
             return -1;
         }
         if (buffer[count - 1] != '\n') fputc('\n', stderr);
-        if (*client_id == 3 && !order->first_printed) {
-            order->first_printed = 1;
-            if (demo_after_first(order) == -1) goto demo_error;
-        }
-        if (*client_id == 4 && buffer[count - 1] == '\n') {
-            if (demo_continue(order->first_fd) == -1) goto demo_error;
-            order->first_fd = -1;
-        }
         /* Одна порция за проход, чтобы обслужить остальных готовых клиентов. */
         return 0;
     }
@@ -111,26 +98,16 @@ static int handle_client(struct pollfd *slot, int *client_id, struct demo_order 
         }
     }
 
-    if ((*client_id == 3 || *client_id == 4) &&
-        (order->first_fd >= 0 || order->second_fd >= 0)) {
-        fprintf(stderr, "Клиент отключился до завершения синхронизации демо.\n");
-        return -1;
-    }
     /* EOF или ошибка закрывает только это соединение. Сервер продолжает работу. */
     close(slot->fd);
     slot->fd = -1;
     return 0;
-
-demo_error:
-    perror("demo acknowledgement");
-    return -1;
 }
 
 static int serve(int listener, int demo)
 {
     struct pollfd fds[MAX_CLIENTS + 1];
     int client_ids[MAX_CLIENTS + 1];
-    struct demo_order order = {-1, -1, 0};
     int status = EXIT_FAILURE;
     int accepted = 0;
     int finished = 0;
@@ -169,7 +146,7 @@ static int serve(int listener, int demo)
         }
         for (int i = 1; i <= MAX_CLIENTS; i++) {
             if (fds[i].fd == -1) continue;
-            if (handle_client(&fds[i], &client_ids[i], &order) == -1) goto cleanup;
+            if (handle_client(&fds[i], &client_ids[i]) == -1) goto cleanup;
             if (demo && fds[i].fd == -1) finished++;
         }
         /* В демо выходим только после того, как дочитали обоих клиентов. */

@@ -119,35 +119,21 @@ done:
     return status;
 }
 
-static int wait_for_server(int connection)
+static int send_numbered_line(int connection, int number)
 {
-    unsigned char ready;
-    ssize_t count;
-
-    do {
-        count = read(connection, &ready, 1);
-    } while (count < 0 && errno == EINTR);
-    if (count == 1 && ready == 1) return 0;
-    if (count >= 0) errno = EIO;
-    return -1;
-}
-
-static int send_numbered_line(int connection, int number, int sync)
-{
-    static const unsigned char first[] = "Hello World\n";
-    static const unsigned char second[] = "nice hat\n";
-    unsigned char id = (unsigned char)(number + (sync ? 2 : 0));
+    static const unsigned char first[] = "Hello Hello Hello World World World\n";
+    static const unsigned char second[] = "nice hat nice hat nice hat\n";
+    unsigned char id = (unsigned char)number;
 
     if (write_all(connection, &id, 1) == -1) goto failed;
-    if (number == 1) {
-        for (size_t i = 0; i < sizeof(first) - 1; i++) {
-            if (write_all(connection, first + i, 1) == -1) goto failed;
-            /* После первой буквы ждём, пока сервер выведет строку клиента 2. */
-            if (sync && i == 0 && wait_for_server(connection) == -1) goto failed;
+    for (int line = 0; line < 1000; line++) {
+        if (number == 1) {
+            for (size_t i = 0; i < sizeof(first) - 1; i++) {
+                if (write_all(connection, first + i, 1) == -1) goto failed;
+            }
+        } else {
+            if (write_all(connection, second, sizeof(second) - 1) == -1) goto failed;
         }
-    } else {
-        if (sync && wait_for_server(connection) == -1) goto failed;
-        if (write_all(connection, second, sizeof(second) - 1) == -1) goto failed;
     }
     return EXIT_SUCCESS;
 
@@ -248,16 +234,14 @@ int main(int argc, char *argv[])
     int offset = 0;
     const char *name = strrchr(argv[0], '/');
     int named_client;
-    int sync;
     int manual;
 
     name = name ? name + 1 : argv[0];
     named_client = strcmp(name, "client1") == 0 ? 1 :
                    strcmp(name, "client2") == 0 ? 2 : 0;
-    sync = named_client && argc > 1 && strcmp(argv[1], "--sync") == 0;
     manual = named_client && argc > 1 && strcmp(argv[1], "--manual") == 0;
-    if (named_client && (demo || file_mode || argc > ((sync || manual) ? 3 : 2))) {
-        fprintf(stderr, "Использование: %s [--sync | --manual] [путь-к-сокету]\n", argv[0]);
+    if (named_client && (demo || file_mode || argc > (manual ? 3 : 2))) {
+        fprintf(stderr, "Использование: %s [--manual] [путь-к-сокету]\n", argv[0]);
         return EXIT_FAILURE;
     }
     if (manual && !isatty(STDIN_FILENO)) {
@@ -277,7 +261,7 @@ int main(int argc, char *argv[])
                 argv[0], argv[0], argv[0], argv[0]);
         return EXIT_FAILURE;
     }
-    path = (sync || manual) ? (argc == 3 ? argv[2] : DEFAULT_SOCKET) :
+    path = manual ? (argc == 3 ? argv[2] : DEFAULT_SOCKET) :
            auto_demo ? DEFAULT_SOCKET :
            (demo || file_mode) ? argv[3] : (argc == 2 ? argv[1] : DEFAULT_SOCKET);
     if (make_address(&address, path) == -1) {
@@ -298,7 +282,7 @@ int main(int argc, char *argv[])
     if (manual) {
         status = send_manual_input(connection, (unsigned char)named_client);
     } else if (named_client) {
-        status = send_numbered_line(connection, named_client, sync);
+        status = send_numbered_line(connection, named_client);
     } else if (auto_demo) {
         status = run_auto_demo(connection, &address);
     } else if (demo) {
